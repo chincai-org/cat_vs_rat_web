@@ -131,11 +131,15 @@ pub struct App {
     assets: Assets,
     screen: Screen,
     cursor_pointer: bool,
-    /// Loaded after the first frame so the menu does not wait for 850 KB.
+    /// Loaded only after a user gesture on web so the menu does not wait for
+    /// or compete with 850 KB of audio.
     music: Option<Sound>,
     music_pending: Option<Coroutine<Option<Sound>>>,
     music_requested: bool,
     music_started: bool,
+    music_failed: bool,
+    /// Small countdown beep, loaded after the first frame.
+    countdown_pending: Option<Coroutine<Option<Sound>>>,
     debug: bool,
     keymap: KeyMap,
     /// A map that arrived through a URL or share link.
@@ -159,6 +163,10 @@ fn new_round(a: &Assets, map: Map, back: Back, seed: u64) -> Round {
 
 async fn load_music() -> Option<Sound> {
     load_sound("Assets/Music.ogg").await.ok()
+}
+
+async fn load_countdown() -> Option<Sound> {
+    load_sound("Assets/countdown.ogg").await.ok()
 }
 
 /// Order inside each array matches Dir::index(): Up, Down, Left, Right.
@@ -290,9 +298,11 @@ impl App {
             screen: Screen::Menu,
             cursor_pointer: false,
             music: None,
-            music_pending: Some(start_coroutine(load_music())),
+            music_pending: None,
             music_requested: cfg!(not(target_arch = "wasm32")),
             music_started: false,
+            music_failed: false,
+            countdown_pending: Some(start_coroutine(load_countdown())),
             shared: url_map
                 .and_then(|reference| map_from_reference(reference.trim()))
                 .or_else(|| {
@@ -312,25 +322,42 @@ impl App {
         now_ms ^ self.seed_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
     }
 
-    /// Collect the background music once its coroutine finishes, then start it
-    /// after the browser's first user gesture (autoplay policy).
+    /// Collect the countdown beep once its background load finishes.
+    fn poll_countdown(&mut self) {
+        if self.countdown_pending.as_ref().is_some_and(|c| c.is_done()) {
+            if let Some(pending) = self.countdown_pending.take() {
+                self.assets.countdown = pending.retrieve().flatten();
+            }
+        }
+    }
+
+    /// Start the music download after the browser's first user gesture
+    /// (autoplay policy), then play it once decoding finishes.
     fn poll_music(&mut self) {
+        if !self.music_requested || self.music_started || self.music_failed {
+            return;
+        }
+        if self.music_pending.is_none() && self.music.is_none() {
+            self.music_pending = Some(start_coroutine(load_music()));
+        }
         if self.music_pending.as_ref().is_some_and(|c| c.is_done()) {
             if let Some(pending) = self.music_pending.take() {
                 self.music = pending.retrieve().flatten();
+                if self.music.is_none() {
+                    self.music_failed = true;
+                    return;
+                }
             }
         }
-        if self.music_requested && !self.music_started {
-            if let Some(music) = &self.music {
-                play_sound(
-                    music,
-                    PlaySoundParams {
-                        looped: true,
-                        volume: 0.5,
-                    },
-                );
-                self.music_started = true;
-            }
+        if let Some(music) = &self.music {
+            play_sound(
+                music,
+                PlaySoundParams {
+                    looped: true,
+                    volume: 0.5,
+                },
+            );
+            self.music_started = true;
         }
     }
 
@@ -354,6 +381,7 @@ impl App {
         {
             self.music_requested = true;
         }
+        self.poll_countdown();
         self.poll_music();
         // A paste request can resolve late; never let it replace a live round.
         let accepts_import = matches!(

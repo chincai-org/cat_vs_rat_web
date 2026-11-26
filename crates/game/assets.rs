@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use macroquad::audio::{Sound, load_sound};
+use macroquad::audio::Sound;
 use macroquad::prelude::*;
 
 /// Startup textures. Downloaded together so one slow file does not delay the
@@ -75,6 +75,40 @@ async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
         .collect()
 }
 
+/// Join two futures with different output types. `join_all` only handles one
+/// future type; this starts the font in the same frame as textures.
+async fn join_pair<A, B>(
+    first: impl Future<Output = A>,
+    second: impl Future<Output = B>,
+) -> (A, B) {
+    let mut first = Box::pin(first);
+    let mut second = Box::pin(second);
+    let mut first_output = None;
+    let mut second_output = None;
+    std::future::poll_fn(|cx: &mut Context<'_>| {
+        if first_output.is_none() {
+            if let Poll::Ready(value) = first.as_mut().poll(cx) {
+                first_output = Some(value);
+            }
+        }
+        if second_output.is_none() {
+            if let Poll::Ready(value) = second.as_mut().poll(cx) {
+                second_output = Some(value);
+            }
+        }
+        if first_output.is_some() && second_output.is_some() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    (
+        first_output.expect("first joined future has a value"),
+        second_output.expect("second joined future has a value"),
+    )
+}
+
 async fn image(name: &str) -> Image {
     let path = format!("Assets/{name}");
     load_image(&path)
@@ -100,12 +134,10 @@ fn toolbar_textures(image: Image) -> (Texture2D, Texture2D) {
 
 impl Assets {
     pub async fn load() -> Assets {
-        let font = load_ttf_font("Assets/font.ttf")
-            .await
-            .expect("cannot load Assets/font.ttf");
-
+        let font = load_ttf_font("Assets/font.ttf");
         let futures = IMAGE_NAMES.iter().map(|name| image(name)).collect();
-        let images = join_all(futures).await;
+        let (font, images) = join_pair(font, join_all(futures)).await;
+        let font = font.expect("cannot load Assets/font.ttf");
         let images: [Image; IMAGE_NAMES.len()] = match images.try_into() {
             Ok(images) => images,
             Err(_) => panic!("one image per texture"),
@@ -147,8 +179,8 @@ impl Assets {
             spike_active: Texture2D::from_image(&spike_active),
             toolbar,
             toolbar_hover,
-            // Music is large, so App loads it after the first frame.
-            countdown: load_sound("Assets/countdown.ogg").await.ok(),
+            // App loads the countdown sound after the first frame.
+            countdown: None,
         }
     }
 }
