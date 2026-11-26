@@ -1,0 +1,14 @@
+[package]
+name = "cat-vs-rat"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[[bin]]
+name = "cat_vs_rat"
+path = "main.rs"
+
+[dependencies]
+cat_vs_rat_core = { path = "../core" }
+macroquad = { version = "0.4", features = ["audio"] }
+quad-storage = "0.1"

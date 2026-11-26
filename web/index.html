@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Cat vs Rat</title>
+		<link rel="icon" href="Assets/Cat_Avatar_Rounded.png">
+		<style>
+			html, body, canvas { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; position: absolute; background: #000; z-index: 0; }
+			canvas:focus { outline: none; }
+			#share-status { position: fixed; right: 8px; bottom: 8px; z-index: 5; display: none; pointer-events: none;
+				font: 14px sans-serif; padding: 8px 12px; color: #fff; background: #222;
+				border-radius: 6px; }
+		</style>
+	</head>
+	<body>
+		<canvas id="glcanvas" tabindex="1"></canvas>
+		<div id="share-status" role="status" aria-live="polite"></div>
+
+		<script>
+			const KEY_IN = "catvsrat.incoming";
+			const KEY_URL_MAP = "catvsrat.url_map";
+			const KEY_DEBUG = "catvsrat.debug";
+			(function () {
+				try {
+					const params = new URLSearchParams(location.search);
+					const map = params.get("map");
+					if (map) localStorage.setItem(KEY_URL_MAP, map);
+					const debug = params.get("debug");
+					localStorage.setItem(KEY_DEBUG,
+						params.has("debug") && !/^(0|false|off)$/i.test(debug ?? "") ? "1" : "0");
+				} catch (e) {}
+
+				const m = /^#m=([A-Za-z0-9_-]+)$/.exec(location.hash);
+				if (!m) return;
+				try { localStorage.setItem(KEY_IN, m[1]); } catch (e) {}
+				history.replaceState(null, "", location.pathname + location.search);
+			})();
+		</script>
+
+
+		<script src="mq_js_bundle.js"></script>
+		<script src="sapp_jsutils.js"></script>
+		<script src="quad-storage.js"></script>
+		<script>
+			const status = document.getElementById("share-status");
+			const showStatus = (message) => {
+				status.style.display = "block";
+				status.textContent = message;
+			};
+			const decodeWasmText = (ptr, len) =>
+				new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, ptr, len));
+
+			importObject.env.cat_vs_rat_copy_share_link = async (ptr, len) => {
+				const token = decodeWasmText(ptr, len);
+				const link = location.origin + location.pathname + "#m=" + token;
+				showStatus("Copying share link...");
+				try {
+					await navigator.clipboard.writeText(link);
+					showStatus("Share link copied.");
+				} catch (error) {
+					console.error("Clipboard copy failed:", error);
+					showStatus(`Copy failed: ${error?.name ?? "unknown error"}.`);
+				}
+			};
+			importObject.env.cat_vs_rat_copy_json = async (ptr, len) => {
+				showStatus("Copying map JSON...");
+				try {
+					await navigator.clipboard.writeText(decodeWasmText(ptr, len));
+					showStatus("Map JSON copied.");
+				} catch (error) {
+					console.error("Clipboard copy failed:", error);
+					showStatus(`Copy failed: ${error?.name ?? "unknown error"}.`);
+				}
+			};
+			importObject.env.cat_vs_rat_paste_json = async () => {
+				showStatus("Reading map JSON from clipboard...");
+				try {
+					localStorage.setItem("catvsrat.import_json", await navigator.clipboard.readText());
+					showStatus("Map JSON received; importing...");
+				} catch (error) {
+					console.error("Clipboard read failed:", error);
+					// Tell Rust the read failed instead of leaving it waiting forever.
+					try { localStorage.setItem("catvsrat.import_json", ""); } catch (e) {}
+					showStatus(`Paste failed: ${error?.name ?? "unknown error"}.`);
+				}
+			};
+
+			// The game uses right-click as an eraser and Ctrl+S/Z/Y as editor keys.
+			window.addEventListener("contextmenu", (event) => event.preventDefault());
+			window.addEventListener("keydown", (event) => {
+				if (!(event.ctrlKey || event.metaKey)) return;
+				const key = event.key.toLowerCase();
+				if (key === "s" || key === "z" || key === "y") event.preventDefault();
+			}, { capture: true });
+
+			load("cat_vs_rat.wasm");
+		</script>
+	</body>
+</html>

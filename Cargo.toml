@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/game"]
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = true
