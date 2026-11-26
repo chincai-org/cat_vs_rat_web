@@ -18,6 +18,10 @@ const FOOT_LEFT: f32 = 0.05;
 const FOOT_RIGHT: f32 = 0.95;
 const FOOT_TOP: f32 = 0.60;
 const FOOT_BOTTOM: f32 = 1.0;
+/// Boxes block with a slightly narrower footprint than actors so their side
+/// walls feel less grabby.
+const BOX_LEFT: f32 = 0.10;
+const BOX_RIGHT: f32 = 0.90;
 /// Tomato art is narrower than its cell, so its horizontal blocker matches it.
 const TOMATO_LEFT: f32 = 0.30;
 const TOMATO_RIGHT: f32 = 0.70;
@@ -88,9 +92,9 @@ impl Collider {
     fn box_run(x: i32, top: i32, bottom: i32) -> Self {
         debug_assert!(top <= bottom, "a box run ends at or below its start");
         Self {
-            left: x as f32 + FOOT_LEFT,
+            left: x as f32 + BOX_LEFT,
             top: top as f32 + FOOT_TOP,
-            right: x as f32 + FOOT_RIGHT,
+            right: x as f32 + BOX_RIGHT,
             bottom: bottom as f32 + FOOT_BOTTOM,
         }
     }
@@ -455,8 +459,11 @@ fn move_sprite_with_colliders(
     let mut free_right = (COLS - 1) as f32 - x;
 
     for blocker in blockers {
-        let overlaps_y = actor.top < blocker.bottom + COLLISION_EPSILON
-            && actor.bottom > blocker.top - COLLISION_EPSILON;
+        // Strict overlap, not contact: a sprite resting on a box top has its
+        // feet exactly on the box footprint's top edge and must still walk
+        // sideways over it. The epsilon form counted that contact as a wall.
+        let overlaps_y =
+            actor.top < blocker.bottom && actor.bottom > blocker.top;
         if overlaps_y {
             if blocker.right <= actor.left + COLLISION_EPSILON {
                 free_left = free_left.min(
@@ -469,8 +476,10 @@ fn move_sprite_with_colliders(
             }
         }
 
-        let overlaps_x = actor.left < blocker.right + COLLISION_EPSILON
-            && actor.right > blocker.left - COLLISION_EPSILON;
+        // Same rule on the other axis: touching a box side while moving
+        // vertically must not count as standing on top of or under it.
+        let overlaps_x =
+            actor.left < blocker.right && actor.right > blocker.left;
         if overlaps_x {
             if blocker.bottom <= actor.top + COLLISION_EPSILON {
                 free_up = free_up.min(
@@ -637,6 +646,23 @@ mod tests {
     }
 
     #[test]
+    fn feet_touching_a_box_top_do_not_block_sideways_movement() {
+        // Boxes side by side, tomato above the right one. A rat on the left
+        // box has its feet on the right box's footprint edge. Touching there
+        // used to count as a wall, so the rat could not move right.
+        let m = map(&[[0, 0]], &[[9, 2]], &[[10, 3]], &[[9, 4], [10, 4]]);
+        let mut g = Game::new(&m, 1);
+        for _ in 0..60 {
+            g.step(&rat_holds(Dir::Down));
+        }
+        let y = g.rats[0].y;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x > 10.0, "rat stuck at y={y} x={}", g.rats[0].x);
+    }
+
+    #[test]
     fn sprite_can_move_up_while_beside_stacked_boxes() {
         let mut g = Game::new(
             &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 1], [3, 2]]),
@@ -682,7 +708,7 @@ mod tests {
         for _ in 0..180 {
             g.step(&cat_holds(Dir::Right));
         }
-        assert!((g.cats[0].x - 3.1).abs() < 1e-3);
+        assert!((g.cats[0].x - 3.15).abs() < 1e-3);
     }
 
     #[test]
