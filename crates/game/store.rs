@@ -1,10 +1,12 @@
 //! Custom maps, clipboard hand-off, and URL parameters, kept in the browser's
 //! localStorage (a local file on desktop).
 
+use crate::keymap::KeyMap;
 use cat_vs_rat_core::Map;
 use quad_storage::STORAGE;
 
 const MAP_PREFIX: &str = "catvsrat.map.";
+const KEY_KEYMAP: &str = "catvsrat.keymap";
 /// index.html writes a token from a #m=... link here before the game starts.
 const KEY_INCOMING: &str = "catvsrat.incoming";
 const KEY_URL_MAP: &str = "catvsrat.url_map";
@@ -106,4 +108,20 @@ pub fn take_import_map() -> Option<String> {
 
 pub fn debug_enabled() -> bool {
     STORAGE.lock().unwrap().get(KEY_DEBUG).as_deref() == Some("1")
+}
+
+pub fn load_keymap() -> KeyMap {
+    STORAGE
+        .lock()
+        .unwrap()
+        .get(KEY_KEYMAP)
+        .and_then(|text| KeyMap::from_storage(&text))
+        .unwrap_or_default()
+}
+
+pub fn save_keymap(keymap: &KeyMap) {
+    STORAGE
+        .lock()
+        .unwrap()
+        .set(KEY_KEYMAP, &keymap.to_storage());
 }

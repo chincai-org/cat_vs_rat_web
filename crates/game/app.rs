@@ -2,10 +2,14 @@
 
 use crate::assets::Assets;
 use crate::editor_ui::{EditorAction, EditorScreen};
+use crate::keymap::{KeyMap, Side};
 use crate::store;
 use crate::view::{H, View, W, draw_board_bg, draw_game};
-use cat_vs_rat_core::{FIXED_DT, Game, Input, Map, Outcome, share};
-use macroquad::audio::{PlaySoundParams, play_sound, play_sound_once};
+use cat_vs_rat_core::{Dir, FIXED_DT, Game, Input, Map, Outcome, share};
+use macroquad::audio::{
+    PlaySoundParams, Sound, load_sound, play_sound, play_sound_once,
+};
+use macroquad::experimental::coroutines::{Coroutine, start_coroutine};
 use macroquad::prelude::*;
 
 const BUILTIN_MAP: &str = include_str!("../../maps/map_1.txt");
@@ -106,8 +110,15 @@ impl ListState {
     }
 }
 
+/// Which action is waiting for a new key, plus feedback for the last change.
+struct ControlsState {
+    listening: Option<(Side, Dir)>,
+    message: Option<String>,
+}
+
 enum Screen {
     Menu,
+    Controls(ControlsState),
     MapList(ListState),
     Editor(EditorScreen),
     Countdown(Round),
@@ -120,8 +131,13 @@ pub struct App {
     assets: Assets,
     screen: Screen,
     cursor_pointer: bool,
+    /// Loaded after the first frame so the menu does not wait for 850 KB.
+    music: Option<Sound>,
+    music_pending: Option<Coroutine<Option<Sound>>>,
+    music_requested: bool,
     music_started: bool,
     debug: bool,
+    keymap: KeyMap,
     /// A map that arrived through a URL or share link.
     shared: Option<Map>,
     /// Mixed into the clock so two rounds started in the same millisecond differ.
@@ -141,9 +157,13 @@ fn new_round(a: &Assets, map: Map, back: Back, seed: u64) -> Round {
     }
 }
 
-/// Order matches Dir::index(): Up, Down, Left, Right.
-fn read_input() -> Input {
-    let keys = |k: [KeyCode; 4]| {
+async fn load_music() -> Option<Sound> {
+    load_sound("Assets/Music.ogg").await.ok()
+}
+
+/// Order inside each array matches Dir::index(): Up, Down, Left, Right.
+fn read_input(keymap: &KeyMap) -> Input {
+    let keys = |k: &[KeyCode; 4]| {
         [
             is_key_down(k[0]),
             is_key_down(k[1]),
@@ -152,8 +172,8 @@ fn read_input() -> Input {
         ]
     };
     Input {
-        cat: keys([KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right]),
-        rat: keys([KeyCode::W, KeyCode::S, KeyCode::A, KeyCode::D]),
+        cat: keys(keymap.keys(Side::Cat)),
+        rat: keys(keymap.keys(Side::Rat)),
     }
 }
 
@@ -201,25 +221,78 @@ fn draw_round_hud(v: &View, a: &Assets, round: &Round, debug: bool) {
     }
 }
 
+fn dir_label(dir: Dir) -> &'static str {
+    match dir {
+        Dir::Up => "Move up",
+        Dir::Down => "Move down",
+        Dir::Left => "Move left",
+        Dir::Right => "Move right",
+    }
+}
+
+/// One player's binding column. Returns the action whose Change button was
+/// clicked.
+fn draw_binding_panel(
+    v: &View,
+    a: &Assets,
+    keymap: &KeyMap,
+    side: Side,
+    x: f32,
+    listening: Option<(Side, Dir)>,
+    enabled: bool,
+) -> Option<(Side, Dir)> {
+    const PANEL_W: f32 = 390.0;
+    v.rect(x, 165.0, PANEL_W, 330.0, Color::new(0.0, 0.0, 0.0, 0.35));
+    v.rect_lines(x, 165.0, PANEL_W, 330.0, 2.0, WHITE);
+    v.text(&a.font, side.label(), x + 18.0, 205.0, 30, YELLOW);
+
+    let mut clicked = None;
+    for dir in Dir::ALL {
+        let y = 220.0 + dir.index() as f32 * 62.0;
+        let is_listening = listening == Some((side, dir));
+        v.text(&a.font, dir_label(dir), x + 18.0, y + 30.0, 22, WHITE);
+
+        let badge = if is_listening {
+            Color::new(0.97, 0.78, 0.35, 1.0)
+        } else {
+            WHITE
+        };
+        v.rect(x + 130.0, y, 130.0, 44.0, badge);
+        v.rect_lines(x + 130.0, y, 130.0, 44.0, 2.0, BLACK);
+        let key_text = if is_listening {
+            "Press a key".to_string()
+        } else {
+            KeyMap::label(keymap.key(side, dir))
+        };
+        v.text_centered(&a.font, &key_text, x + 195.0, y + 29.0, 22, BLACK);
+
+        if v.button(
+            &a.font,
+            "Change",
+            x + 272.0,
+            y,
+            100.0,
+            44.0,
+            enabled && !is_listening,
+        ) {
+            clicked = Some((side, dir));
+        }
+    }
+    clicked
+}
+
 impl App {
     pub fn new(assets: Assets) -> App {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(m) = &assets.music {
-            play_sound(
-                m,
-                PlaySoundParams {
-                    looped: true,
-                    volume: 0.5,
-                },
-            );
-        }
         let url_map = store::take_url_map();
         let incoming = store::take_incoming();
         App {
             assets,
             screen: Screen::Menu,
             cursor_pointer: false,
-            music_started: cfg!(not(target_arch = "wasm32")),
+            music: None,
+            music_pending: Some(start_coroutine(load_music())),
+            music_requested: cfg!(not(target_arch = "wasm32")),
+            music_started: false,
             shared: url_map
                 .and_then(|reference| map_from_reference(reference.trim()))
                 .or_else(|| {
@@ -228,6 +301,7 @@ impl App {
                     })
                 }),
             debug: store::debug_enabled(),
+            keymap: store::load_keymap(),
             seed_counter: 0,
         }
     }
@@ -238,19 +312,25 @@ impl App {
         now_ms ^ self.seed_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
     }
 
-    fn start_music(&mut self) {
-        if self.music_started {
-            return;
+    /// Collect the background music once its coroutine finishes, then start it
+    /// after the browser's first user gesture (autoplay policy).
+    fn poll_music(&mut self) {
+        if self.music_pending.as_ref().is_some_and(|c| c.is_done()) {
+            if let Some(pending) = self.music_pending.take() {
+                self.music = pending.retrieve().flatten();
+            }
         }
-        self.music_started = true;
-        if let Some(music) = &self.assets.music {
-            play_sound(
-                music,
-                PlaySoundParams {
-                    looped: true,
-                    volume: 0.5,
-                },
-            );
+        if self.music_requested && !self.music_started {
+            if let Some(music) = &self.music {
+                play_sound(
+                    music,
+                    PlaySoundParams {
+                        looped: true,
+                        volume: 0.5,
+                    },
+                );
+                self.music_started = true;
+            }
         }
     }
 
@@ -269,11 +349,12 @@ impl App {
         }
 
         // Web audio stays suspended until input; start music on the first user gesture.
-        if !self.music_started
+        if !self.music_requested
             && (is_any_key_down() || is_mouse_button_pressed(MouseButton::Left))
         {
-            self.start_music();
+            self.music_requested = true;
         }
+        self.poll_music();
         // A paste request can resolve late; never let it replace a live round.
         let accepts_import = matches!(
             self.screen,
@@ -319,6 +400,7 @@ impl App {
         let seed = self.next_seed();
         match screen {
             Screen::Menu => self.menu(v),
+            Screen::Controls(st) => self.controls(v, st),
             Screen::MapList(st) => self.map_list(v, st),
             Screen::Editor(mut ed) => match ed.frame(v, &self.assets) {
                 EditorAction::Stay => Screen::Editor(ed),
@@ -351,6 +433,12 @@ impl App {
         if v.button(&a.font, "Map editor", 480.0, 260.0, 320.0, 56.0, true) {
             next = Screen::Editor(EditorScreen::new(Map::default(), None));
         }
+        if v.button(&a.font, "Controls", 480.0, 330.0, 320.0, 56.0, true) {
+            next = Screen::Controls(ControlsState {
+                listening: None,
+                message: None,
+            });
+        }
 
         let mut dismiss = false;
         if let Some(shared) = &self.shared {
@@ -358,11 +446,11 @@ impl App {
                 &a.font,
                 "A map was loaded from the URL",
                 W / 2.0,
-                370.0,
+                420.0,
                 26,
                 YELLOW,
             );
-            if v.button(&a.font, "Play it", 400.0, 390.0, 150.0, 44.0, true) {
+            if v.button(&a.font, "Play it", 400.0, 440.0, 150.0, 44.0, true) {
                 next = Screen::Countdown(new_round(
                     a,
                     shared.clone(),
@@ -371,12 +459,12 @@ impl App {
                 ));
                 dismiss = true;
             }
-            if v.button(&a.font, "Edit a copy", 565.0, 390.0, 150.0, 44.0, true)
+            if v.button(&a.font, "Edit a copy", 565.0, 440.0, 150.0, 44.0, true)
             {
                 next = Screen::Editor(EditorScreen::new(shared.clone(), None));
                 dismiss = true;
             }
-            if v.button(&a.font, "Dismiss", 730.0, 390.0, 150.0, 44.0, true) {
+            if v.button(&a.font, "Dismiss", 730.0, 440.0, 150.0, 44.0, true) {
                 dismiss = true;
             }
         }
@@ -384,15 +472,130 @@ impl App {
             self.shared = None;
         }
 
+        let hint = format!(
+            "Cats: {} {} {} {}     Rats: {} {} {} {}",
+            KeyMap::label(self.keymap.key(Side::Cat, Dir::Up)),
+            KeyMap::label(self.keymap.key(Side::Cat, Dir::Down)),
+            KeyMap::label(self.keymap.key(Side::Cat, Dir::Left)),
+            KeyMap::label(self.keymap.key(Side::Cat, Dir::Right)),
+            KeyMap::label(self.keymap.key(Side::Rat, Dir::Up)),
+            KeyMap::label(self.keymap.key(Side::Rat, Dir::Down)),
+            KeyMap::label(self.keymap.key(Side::Rat, Dir::Left)),
+            KeyMap::label(self.keymap.key(Side::Rat, Dir::Right)),
+        );
+        v.text_centered(&a.font, &hint, W / 2.0, 550.0, 22, WHITE);
+        next
+    }
+
+    fn controls(&mut self, v: &View, mut st: ControlsState) -> Screen {
+        let a = &self.assets;
+        draw_board_bg(v, a, 64.0, 0.0, 0.0);
+        v.rect(200.0, 40.0, 880.0, 560.0, Color::new(0.0, 0.0, 0.0, 0.72));
+        v.text_centered(&a.font, "Controls", W / 2.0, 105.0, 54, WHITE);
         v.text_centered(
             &a.font,
-            "Cats: arrow keys     Rats: W A S D",
+            "Click Change, then press a key. Esc cancels.",
             W / 2.0,
-            520.0,
-            24,
+            145.0,
+            22,
             WHITE,
         );
-        next
+
+        let was_listening = st.listening.is_some();
+        if let Some((side, dir)) = st.listening {
+            if is_key_pressed(KeyCode::Escape) {
+                st.listening = None;
+                st.message = Some("Rebinding cancelled.".to_string());
+            } else if let Some(key) = get_last_key_pressed() {
+                if KeyMap::reserved(key) {
+                    st.message = Some(format!(
+                        "{} is reserved. Press another key.",
+                        KeyMap::label(key)
+                    ));
+                } else {
+                    let old = self.keymap.key(side, dir);
+                    let owner = self.keymap.owner(key);
+                    self.keymap.bind(side, dir, key);
+                    store::save_keymap(&self.keymap);
+                    st.listening = None;
+                    let label = KeyMap::label(key);
+                    st.message = Some(match owner {
+                        Some(owner) if owner == (side, dir) => format!(
+                            "{}: {} already uses {label}.",
+                            side.label(),
+                            dir_label(dir)
+                        ),
+                        Some((other_side, other_dir)) => format!(
+                            "{}: {} uses {label}; {}: {} takes {}.",
+                            side.label(),
+                            dir_label(dir),
+                            other_side.label(),
+                            dir_label(other_dir),
+                            KeyMap::label(old)
+                        ),
+                        None => format!(
+                            "{}: {} now uses {label}.",
+                            side.label(),
+                            dir_label(dir)
+                        ),
+                    });
+                }
+            }
+        }
+
+        let enabled = st.listening.is_none();
+        let mut clicked = None;
+        if let Some(hit) = draw_binding_panel(
+            v,
+            a,
+            &self.keymap,
+            Side::Cat,
+            240.0,
+            st.listening,
+            enabled,
+        ) {
+            clicked = Some(hit);
+        }
+        if let Some(hit) = draw_binding_panel(
+            v,
+            a,
+            &self.keymap,
+            Side::Rat,
+            650.0,
+            st.listening,
+            enabled,
+        ) {
+            clicked = Some(hit);
+        }
+        if let Some((side, dir)) = clicked {
+            st.listening = Some((side, dir));
+            st.message = None;
+        }
+
+        if let Some(message) = &st.message {
+            v.text_centered(&a.font, message, W / 2.0, 520.0, 22, YELLOW);
+        }
+
+        if v.button(
+            &a.font,
+            "Reset defaults",
+            330.0,
+            535.0,
+            200.0,
+            48.0,
+            enabled,
+        ) {
+            self.keymap.reset();
+            store::save_keymap(&self.keymap);
+            st.message = Some("Default keys restored.".to_string());
+        }
+        if v.button(&a.font, "Back", 750.0, 535.0, 200.0, 48.0, enabled)
+            || (is_key_pressed(KeyCode::Escape) && !was_listening)
+        {
+            return Screen::Menu;
+        }
+
+        Screen::Controls(st)
     }
 
     fn map_list(&mut self, v: &View, mut st: ListState) -> Screen {
@@ -712,7 +915,7 @@ impl App {
         if is_key_pressed(KeyCode::Escape) {
             return Screen::Paused(round);
         }
-        let input = read_input();
+        let input = read_input(&self.keymap);
         round.acc += get_frame_time().min(0.1);
         let mut outcome = None;
         while round.acc >= FIXED_DT && outcome.is_none() {

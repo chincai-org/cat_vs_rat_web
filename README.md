@@ -62,7 +62,7 @@ are stored in the browser's localStorage (a local file on desktop).
 
 ## Editor and browser features
 
-Custom maps can be renamed, copied as text, and imported from clipboard with **Paste map**. The editor warns when a cat cannot reach any rat, a rat cannot reach any tomato, or a tomato cannot be reached by any rat. During a round, the HUD counts down to the next cat removal. Movement is keyboard-only: arrow keys for cats and WASD for rats.
+Custom maps can be renamed, copied as text, and imported from clipboard with **Paste map**. The editor warns when a cat cannot reach any rat, a rat cannot reach any tomato, or a tomato cannot be reached by any rat. During a round, the HUD counts down to the next cat removal. Movement is keyboard-only: arrow keys for cats and WASD for rats by default. Open **Controls** on the main menu to rebind either side; changes are saved locally and can be reset to defaults.
 
 ### URL parameters
 
@@ -76,7 +76,7 @@ Custom maps can be renamed, copied as text, and imported from clipboard with **P
 
 - Type: Player sprite
 - Size: 1 x 1
-- Controls: Keyboard arrow keys ↑ ← ↓ →
+- Controls: Keyboard arrow keys ↑ ← ↓ → (remappable in **Controls**)
 - Game goal: Kill all rats and protect tomatoes
 - Attributes: Can't walk over tomatoes and other cats
 
@@ -84,7 +84,7 @@ Custom maps can be renamed, copied as text, and imported from clipboard with **P
 
 - Type: Player sprite
 - Size: 1 x 1
-- Controls: W A S D
+- Controls: W A S D (remappable in **Controls**)
 - Game goal: Eat all tomatoes and don't get eaten by a cat
 - Attributes: Can't walk past other rats
 - Player sprites will have a special ability in the future

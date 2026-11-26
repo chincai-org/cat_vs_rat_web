@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod editor_ui;
+mod keymap;
 mod store;
 mod view;
 
