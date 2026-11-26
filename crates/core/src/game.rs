@@ -11,10 +11,16 @@ pub const CAT_SPEED: f32 = 3.5;
 pub const RAT_SPEED: f32 = 7.0;
 
 const EAT_RANGE: f32 = 0.5;
-const ACTOR_HITBOX_LEFT: f32 = 0.05;
-const ACTOR_HITBOX_RIGHT: f32 = 0.95;
-const ACTOR_HITBOX_TOP: f32 = 0.60;
-const ACTOR_HITBOX_BOTTOM: f32 = 0.98;
+/// Ground footprint, at the bottom of the cell. Actors and map objects share
+/// it so sprites can walk behind the upper part of a box (2.5D) but still stop
+/// at its base.
+const FOOT_LEFT: f32 = 0.05;
+const FOOT_RIGHT: f32 = 0.95;
+const FOOT_TOP: f32 = 0.60;
+const FOOT_BOTTOM: f32 = 1.0;
+/// Tomato art is narrower than its cell, so its horizontal blocker matches it.
+const TOMATO_LEFT: f32 = 0.30;
+const TOMATO_RIGHT: f32 = 0.70;
 const COLLISION_EPSILON: f32 = 1e-4;
 const TELEPORT_COOLDOWN: f32 = 2.0;
 /// The original code toggles every 1 s (its README says 2 s).
@@ -65,19 +71,27 @@ struct Collider {
 impl Collider {
     fn actor(x: f32, y: f32) -> Self {
         Self {
-            left: x + ACTOR_HITBOX_LEFT,
-            top: y + ACTOR_HITBOX_TOP,
-            right: x + ACTOR_HITBOX_RIGHT,
-            bottom: y + ACTOR_HITBOX_BOTTOM,
+            left: x + FOOT_LEFT,
+            top: y + FOOT_TOP,
+            right: x + FOOT_RIGHT,
+            bottom: y + FOOT_BOTTOM,
         }
     }
 
     fn object(x: f32, y: f32) -> Self {
+        Self::actor(x, y)
+    }
+
+    /// One column of vertically touching boxes. The footprint covers the
+    /// whole run so sprites cannot slip through the seam between stacked
+    /// boxes, while the top of the run keeps the usual walk-behind area.
+    fn box_run(x: i32, top: i32, bottom: i32) -> Self {
+        debug_assert!(top <= bottom, "a box run ends at or below its start");
         Self {
-            left: x,
-            top: y,
-            right: x + 1.0,
-            bottom: y + 1.0,
+            left: x as f32 + FOOT_LEFT,
+            top: top as f32 + FOOT_TOP,
+            right: x as f32 + FOOT_RIGHT,
+            bottom: bottom as f32 + FOOT_BOTTOM,
         }
     }
 
@@ -93,12 +107,43 @@ fn map_cell_collider(cell: &Cell) -> Collider {
     Collider::object(cell[0] as f32, cell[1] as f32)
 }
 
+/// Cats stop at the tomato's drawn width, not the whole cell.
+fn tomato_collider(cell: &Cell) -> Collider {
+    let [x, y] = *cell;
+    Collider {
+        left: x as f32 + TOMATO_LEFT,
+        top: y as f32 + FOOT_TOP,
+        right: x as f32 + TOMATO_RIGHT,
+        bottom: y as f32 + FOOT_BOTTOM,
+    }
+}
+
+/// Merge every contiguous vertical run of boxes into one footprint.
+///
+/// Two boxes stacked in the same column would otherwise leave a 0.6-cell
+/// seam between their foot footprints, which a sprite could walk through.
+fn box_run_colliders(boxes: &[Cell]) -> Vec<Collider> {
+    boxes
+        .iter()
+        .filter(|cell| !boxes.contains(&[cell[0], cell[1] - 1]))
+        .map(|cell| {
+            let [x, mut bottom] = *cell;
+            while boxes.contains(&[x, bottom + 1]) {
+                bottom += 1;
+            }
+            Collider::box_run(x, cell[1], bottom)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Game {
     pub cats: Vec<Cat>,
     pub rats: Vec<Rat>,
     pub tomatoes: Vec<Cell>,
     pub boxes: Vec<Cell>,
+    /// Precomputed because boxes never move during a round.
+    box_colliders: Vec<Collider>,
     pub holes: Vec<Cell>,
     pub spikes: Vec<Cell>,
     /// All spikes toggle together.
@@ -136,6 +181,7 @@ impl Game {
                 last_teleport: f32::NEG_INFINITY,
             })
             .collect();
+        let box_colliders = box_run_colliders(&map.boxes);
         Game {
             cats: map
                 .cats
@@ -149,6 +195,7 @@ impl Game {
             rats,
             tomatoes: map.tomatoes.clone(),
             boxes: map.boxes.clone(),
+            box_colliders,
             holes: if map.holes.len() == 2 {
                 map.holes.clone()
             } else {
@@ -239,7 +286,7 @@ impl Game {
 
     fn fill_static_blockers(&self, out: &mut Vec<Collider>) {
         out.clear();
-        out.extend(self.boxes.iter().map(map_cell_collider));
+        out.extend(self.box_colliders.iter().copied());
         if self.spikes_active {
             out.extend(self.spikes.iter().map(map_cell_collider));
         }
@@ -255,7 +302,7 @@ impl Game {
                 .filter(|(index, _)| *index != skip)
                 .map(|(_, cat)| Collider::actor(cat.x, cat.y)),
         );
-        out.extend(self.tomatoes.iter().map(map_cell_collider));
+        out.extend(self.tomatoes.iter().map(tomato_collider));
     }
 
     /// Boxes, other rats (dead ones included), active spikes.
@@ -520,23 +567,112 @@ mod tests {
     }
 
     #[test]
-    fn foot_hitbox_is_smaller_than_art_but_stops_at_cell_walls() {
+    fn ground_footprint_stops_at_boxes_but_allows_walking_behind() {
+        // Same row: the box blocks the path at its base.
         let (x, y) = move_sprite(1.0, 1.0, Dir::Right, 3.0, &[(3.0, 1.0)]);
-        assert!((x - 2.05).abs() < 2e-4);
+        assert!((x - 2.1).abs() < 2e-4);
         assert_eq!(y, 1.0);
 
-        let (x, y) = move_sprite(1.0, 1.0, Dir::Down, 3.0, &[(1.0, 2.0)]);
-        assert_eq!(x, 1.0);
-        assert!((y - 1.02).abs() < 2e-4);
-
+        // One row above: the sprite passes behind the box instead of being
+        // stopped a full cell away.
         let (x, y) =
             move_sprite(1.0, 0.5, Dir::Right, 3.0, &[(3.0, 0.0), (3.0, 1.0)]);
-        assert!((x - 2.05).abs() < 2e-4);
+        assert!((x - 4.0).abs() < 2e-4);
         assert_eq!(y, 0.5);
 
-        let (x, y) = move_sprite(2.05, 1.0, Dir::Right, 0.1, &[(3.0, 1.0)]);
-        assert!((x - 2.05).abs() < 2e-4);
+        // From above, it may walk into the top of the box cell and stops when
+        // its feet reach the box base.
+        let (x, y) = move_sprite(1.0, 1.0, Dir::Down, 3.0, &[(1.0, 2.0)]);
+        assert_eq!(x, 1.0);
+        assert!((y - 1.6).abs() < 2e-4);
+
+        // At the stop position it cannot push through the base.
+        let (x, y) = move_sprite(2.1, 1.0, Dir::Right, 0.1, &[(3.0, 1.0)]);
+        assert!((x - 2.1).abs() < 2e-4);
         assert_eq!(y, 1.0);
+
+        // Having stopped behind a box, it can still slide sideways past it.
+        let (x, y) = move_sprite(1.0, 1.0, Dir::Down, 3.0, &[(1.0, 2.0)]);
+        let (x, _) = move_sprite(x, y, Dir::Right, 3.0, &[(1.0, 2.0)]);
+        assert!((x - 4.0).abs() < 2e-4);
+    }
+
+    #[test]
+    fn stacked_boxes_form_a_solid_wall() {
+        let mut g = Game::new(
+            &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 1], [3, 2]]),
+            1,
+        );
+        // Stand in the seam between the two box rows.
+        g.rats[0].y = 1.5;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x < 3.0);
+    }
+
+    #[test]
+    fn stacked_box_top_stops_a_sprite_like_a_single_box() {
+        let single = box_run_colliders(&[[3, 1]]);
+        let stacked = box_run_colliders(&[[3, 1], [3, 2]]);
+        let (_, single_y) =
+            move_sprite_with_colliders(3.0, 0.5, Dir::Down, 3.0, &single);
+        let (_, stacked_y) =
+            move_sprite_with_colliders(3.0, 0.5, Dir::Down, 3.0, &stacked);
+        assert!((single_y - 0.6).abs() < 2e-4);
+        assert!((stacked_y - single_y).abs() < 2e-4);
+    }
+
+    #[test]
+    fn stacked_boxes_can_be_walked_behind_above_their_top() {
+        let mut g = Game::new(
+            &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 1], [3, 2]]),
+            1,
+        );
+        g.rats[0].y = 0.5;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x > 3.0);
+    }
+
+    #[test]
+    fn sprite_can_move_up_while_beside_stacked_boxes() {
+        let mut g = Game::new(
+            &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 1], [3, 2]]),
+            1,
+        );
+        // Beside the bottom box: the column must not widen to the left.
+        g.rats[0].x = 2.0;
+        g.rats[0].y = 2.0;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Up));
+        }
+        assert!(g.rats[0].y < 1.0);
+    }
+
+    #[test]
+    fn isolated_box_can_be_walked_behind() {
+        let mut g =
+            Game::new(&map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 1]]), 1);
+        g.rats[0].y = 0.5;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x > 3.0);
+    }
+
+    #[test]
+    fn horizontal_box_row_can_still_be_walked_behind() {
+        let mut g = Game::new(
+            &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 1], [4, 1]]),
+            1,
+        );
+        g.rats[0].y = 0.5;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x > 4.0);
     }
 
     #[test]
@@ -546,7 +682,7 @@ mod tests {
         for _ in 0..180 {
             g.step(&cat_holds(Dir::Right));
         }
-        assert!((g.cats[0].x - 3.05).abs() < 1e-3);
+        assert!((g.cats[0].x - 3.1).abs() < 1e-3);
     }
 
     #[test]
@@ -556,7 +692,16 @@ mod tests {
         for _ in 0..180 {
             g.step(&cat_holds(Dir::Right));
         }
-        assert!((g.cats[0].x - 3.05).abs() < 1e-3);
+        assert!((g.cats[0].x - 3.35).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tomato_horizontal_block_matches_the_apple_art() {
+        let tomato = tomato_collider(&[3, 1]);
+        assert!(((tomato.right - tomato.left) - 0.4).abs() < 1e-6);
+        let (x, _) =
+            move_sprite_with_colliders(1.0, 1.0, Dir::Right, 3.0, &[tomato]);
+        assert!((x - 2.35).abs() < 2e-4);
     }
 
     #[test]

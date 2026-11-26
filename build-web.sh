@@ -12,7 +12,13 @@ fetch sapp_jsutils.js  https://raw.githubusercontent.com/not-fl3/sapp-jsutils/ma
 fetch quad-storage.js  https://raw.githubusercontent.com/optozorax/quad-storage/master/js/quad-storage.js
 
 rm -rf dist && mkdir -p dist
-cp target/wasm32-unknown-unknown/release/cat_vs_rat.wasm dist/
+WASM=target/wasm32-unknown-unknown/release/cat_vs_rat.wasm
+# Binaryen is optional; it shrinks the wasm further when installed.
+if command -v wasm-opt >/dev/null 2>&1 && wasm-opt -Oz "$WASM" -o dist/cat_vs_rat.wasm; then
+  :
+else
+  cp "$WASM" dist/
+fi
 cp web/index.html dist/
 cp web/vendor/*.js dist/
 cp -r Assets dist/Assets

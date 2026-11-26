@@ -63,25 +63,25 @@
 					showStatus(`Copy failed: ${error?.name ?? "unknown error"}.`);
 				}
 			};
-			importObject.env.cat_vs_rat_copy_json = async (ptr, len) => {
-				showStatus("Copying map JSON...");
+			importObject.env.cat_vs_rat_copy_map = async (ptr, len) => {
+				showStatus("Copying map text...");
 				try {
 					await navigator.clipboard.writeText(decodeWasmText(ptr, len));
-					showStatus("Map JSON copied.");
+					showStatus("Map text copied.");
 				} catch (error) {
 					console.error("Clipboard copy failed:", error);
 					showStatus(`Copy failed: ${error?.name ?? "unknown error"}.`);
 				}
 			};
-			importObject.env.cat_vs_rat_paste_json = async () => {
-				showStatus("Reading map JSON from clipboard...");
+			importObject.env.cat_vs_rat_paste_map = async () => {
+				showStatus("Reading map from clipboard...");
 				try {
-					localStorage.setItem("catvsrat.import_json", await navigator.clipboard.readText());
-					showStatus("Map JSON received; importing...");
+					localStorage.setItem("catvsrat.import_map", await navigator.clipboard.readText());
+					showStatus("Map received; importing...");
 				} catch (error) {
 					console.error("Clipboard read failed:", error);
 					// Tell Rust the read failed instead of leaving it waiting forever.
-					try { localStorage.setItem("catvsrat.import_json", ""); } catch (e) {}
+					try { localStorage.setItem("catvsrat.import_map", ""); } catch (e) {}
 					showStatus(`Paste failed: ${error?.name ?? "unknown error"}.`);
 				}
 			};

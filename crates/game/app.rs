@@ -8,15 +8,23 @@ use cat_vs_rat_core::{FIXED_DT, Game, Input, Map, Outcome, share};
 use macroquad::audio::{PlaySoundParams, play_sound, play_sound_once};
 use macroquad::prelude::*;
 
-const BUILTIN_MAP: &str = include_str!("../../maps/map_1.json");
+const BUILTIN_MAP: &str = include_str!("../../maps/map_1.txt");
 const PER_PAGE: usize = 6;
+/// Map-list row actions share one width and pitch so every button lines up.
+const ROW_BUTTON_X: f32 = 500.0;
+const ROW_BUTTON_W: f32 = 120.0;
+const ROW_BUTTON_GAP: f32 = 4.0;
+
+fn row_button_x(slot: usize) -> f32 {
+    ROW_BUTTON_X + slot as f32 * (ROW_BUTTON_W + ROW_BUTTON_GAP)
+}
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn cat_vs_rat_copy_share_link(token: *const u8, len: usize);
-    fn cat_vs_rat_copy_json(json: *const u8, len: usize);
-    fn cat_vs_rat_paste_json();
+    fn cat_vs_rat_copy_map(text: *const u8, len: usize);
+    fn cat_vs_rat_paste_map();
 }
 
 fn copy_share_link(token: &str) {
@@ -29,21 +37,21 @@ fn copy_share_link(token: &str) {
     macroquad::miniquad::window::clipboard_set(token);
 }
 
-fn copy_json(json: &str) {
+fn copy_map(text: &str) {
     #[cfg(target_arch = "wasm32")]
     {
-        // SAFETY: The JavaScript import copies the JSON before returning.
-        unsafe { cat_vs_rat_copy_json(json.as_ptr(), json.len()) };
+        // SAFETY: The JavaScript import copies the text before returning.
+        unsafe { cat_vs_rat_copy_map(text.as_ptr(), text.len()) };
     }
     #[cfg(not(target_arch = "wasm32"))]
-    macroquad::miniquad::window::clipboard_set(json);
+    macroquad::miniquad::window::clipboard_set(text);
 }
 
-fn request_paste_json() -> Option<String> {
+fn request_paste_map() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
         // SAFETY: The JavaScript import has no arguments and stores its result for Rust to read.
-        unsafe { cat_vs_rat_paste_json() };
+        unsafe { cat_vs_rat_paste_map() };
         None
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -150,7 +158,7 @@ fn read_input() -> Input {
 }
 
 fn map_from_reference(reference: &str) -> Option<Map> {
-    // Share tokens are already capped; direct JSON references need a limit too.
+    // Share tokens are already capped; direct map text needs a limit too.
     const MAX_REFERENCE_LEN: usize = 16 * 1024;
     if reference.len() > MAX_REFERENCE_LEN {
         return None;
@@ -159,10 +167,10 @@ fn map_from_reference(reference: &str) -> Option<Map> {
         .iter()
         .any(|name| reference.eq_ignore_ascii_case(name))
     {
-        return Map::from_json(BUILTIN_MAP).ok();
+        return Map::from_text(BUILTIN_MAP).ok();
     }
 
-    Map::from_json(reference)
+    Map::from_text(reference)
         .ok()
         .or_else(|| store::load_map(reference))
         .or_else(|| share::map_from_token(reference).ok())
@@ -173,11 +181,10 @@ fn draw_round_hud(v: &View, a: &Assets, round: &Round, debug: bool) {
         "NO CATS LEFT".to_string()
     } else {
         format!(
-            "CAT ATTRITION IN: {}s",
+            "CAT LOST IN: {}s",
             round.game.cat_attrition_remaining().ceil() as u32
         )
     };
-    v.rect(8.0, 8.0, 300.0, 34.0, Color::new(0.0, 0.0, 0.0, 0.55));
     v.text(&a.font, &attrition, 18.0, 32.0, 20, WHITE);
 
     if debug {
@@ -273,12 +280,12 @@ impl App {
             Screen::Menu | Screen::MapList(_) | Screen::Editor(_)
         );
         let imported = if accepts_import {
-            store::take_import_json()
+            store::take_import_map()
         } else {
             None
         };
         let screen = match imported {
-            Some(json) => match Map::from_json(&json) {
+            Some(text) => match Map::from_text(&text) {
                 Ok(map) => Screen::Editor(EditorScreen::imported(map)),
                 Err(error) => {
                     let current =
@@ -286,7 +293,7 @@ impl App {
                     match current {
                         Screen::MapList(mut state) => {
                             state.message =
-                                Some(format!("JSON import failed: {error}"));
+                                Some(format!("Map import failed: {error}"));
                             Screen::MapList(state)
                         }
                         other => other,
@@ -441,12 +448,20 @@ impl App {
 
             let load = || {
                 if idx == 0 {
-                    Map::from_json(BUILTIN_MAP).ok()
+                    Map::from_text(BUILTIN_MAP).ok()
                 } else {
                     store::load_map(&customs[idx - 1])
                 }
             };
-            if v.button(&a.font, "Play", 690.0, y, 80.0, 44.0, !modal) {
+            if v.button(
+                &a.font,
+                "Play",
+                row_button_x(0),
+                y,
+                ROW_BUTTON_W,
+                44.0,
+                !modal,
+            ) {
                 if let Some(map) = load() {
                     next = Some(Screen::Countdown(new_round(
                         a,
@@ -457,7 +472,15 @@ impl App {
                 }
             }
             let edit_label = if idx == 0 { "Clone" } else { "Edit" };
-            if v.button(&a.font, edit_label, 775.0, y, 80.0, 44.0, !modal) {
+            if v.button(
+                &a.font,
+                edit_label,
+                row_button_x(1),
+                y,
+                ROW_BUTTON_W,
+                44.0,
+                !modal,
+            ) {
                 if let Some(map) = load() {
                     let saved_name = if idx == 0 {
                         None
@@ -469,7 +492,15 @@ impl App {
                     )));
                 }
             }
-            if v.button(&a.font, "Share", 860.0, y, 80.0, 44.0, !modal) {
+            if v.button(
+                &a.font,
+                "Share",
+                row_button_x(2),
+                y,
+                ROW_BUTTON_W,
+                44.0,
+                !modal,
+            ) {
                 if let Some(map) = load() {
                     let token = share::token_from_map(&map);
                     copy_share_link(&token);
@@ -485,29 +516,53 @@ impl App {
                     }
                 }
             }
-            if v.button(&a.font, "JSON", 945.0, y, 80.0, 44.0, !modal) {
+            if v.button(
+                &a.font,
+                "Copy map",
+                row_button_x(3),
+                y,
+                ROW_BUTTON_W,
+                44.0,
+                !modal,
+            ) {
                 if let Some(map) = load() {
-                    copy_json(&map.to_json());
+                    copy_map(&map.to_text());
                     #[cfg(target_arch = "wasm32")]
                     {
-                        st.message = Some("Copying map JSON...".to_string());
+                        st.message = Some("Copying map text...".to_string());
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         st.message =
-                            Some("Map JSON copied to clipboard.".to_string());
+                            Some("Map text copied to clipboard.".to_string());
                     }
                 }
             }
             if idx > 0 {
                 let this = customs[idx - 1].as_str();
-                if v.button(&a.font, "Rename", 1030.0, y, 90.0, 44.0, !modal) {
+                if v.button(
+                    &a.font,
+                    "Rename",
+                    row_button_x(4),
+                    y,
+                    ROW_BUTTON_W,
+                    44.0,
+                    !modal,
+                ) {
                     st.rename = Some((this.to_string(), this.to_string()));
                     st.confirm = None;
                 }
                 let sure = st.confirm.as_deref() == Some(this);
                 let label = if sure { "Sure?" } else { "Delete" };
-                if v.button(&a.font, label, 1125.0, y, 90.0, 44.0, !modal) {
+                if v.button(
+                    &a.font,
+                    label,
+                    row_button_x(5),
+                    y,
+                    ROW_BUTTON_W,
+                    44.0,
+                    !modal,
+                ) {
                     if sure {
                         store::delete_map(this);
                         st.confirm = None;
@@ -531,23 +586,21 @@ impl App {
             next =
                 Some(Screen::Editor(EditorScreen::new(Map::default(), None)));
         }
-        if v.button(&a.font, "Paste JSON", 290.0, 550.0, 180.0, 44.0, !modal) {
-            match request_paste_json() {
-                Some(json) => match Map::from_json(&json) {
+        if v.button(&a.font, "Paste map", 290.0, 550.0, 180.0, 44.0, !modal) {
+            match request_paste_map() {
+                Some(text) => match Map::from_text(&text) {
                     Ok(map) => {
                         next = Some(Screen::Editor(EditorScreen::imported(map)))
                     }
                     Err(error) => {
-                        st.message =
-                            Some(format!("JSON import failed: {error}"))
+                        st.message = Some(format!("Map import failed: {error}"))
                     }
                 },
                 None => {
                     #[cfg(target_arch = "wasm32")]
                     {
-                        st.message = Some(
-                            "Reading map JSON from clipboard...".to_string(),
-                        );
+                        st.message =
+                            Some("Reading map from clipboard...".to_string());
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -733,11 +786,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn map_url_reference_accepts_builtin_json_and_share_tokens() {
-        let builtin = Map::from_json(BUILTIN_MAP).unwrap();
+    fn map_url_reference_accepts_builtin_text_and_share_tokens() {
+        let builtin = Map::from_text(BUILTIN_MAP).unwrap();
         assert_eq!(map_from_reference("1"), Some(builtin.clone()));
         assert_eq!(
-            map_from_reference(&builtin.to_json()),
+            map_from_reference(&builtin.to_text()),
             Some(builtin.clone())
         );
         let token = share::token_from_map(&builtin);

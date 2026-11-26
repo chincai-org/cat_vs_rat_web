@@ -30,6 +30,8 @@ jobs:
         run: cargo clippy -p cat_vs_rat_core --all-targets -- -D warnings
       - name: Test core
         run: cargo test -p cat_vs_rat_core
+      - name: Install binaryen
+        run: sudo apt-get update && sudo apt-get install -y binaryen
       - name: Build site
         run: ./build-web.sh
       - uses: actions/upload-pages-artifact@v3

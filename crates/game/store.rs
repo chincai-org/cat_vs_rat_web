@@ -1,4 +1,5 @@
-//! Custom maps, clipboard hand-off, and URL parameters, kept in the browser's localStorage (a local file on desktop).
+//! Custom maps, clipboard hand-off, and URL parameters, kept in the browser's
+//! localStorage (a local file on desktop).
 
 use cat_vs_rat_core::Map;
 use quad_storage::STORAGE;
@@ -7,7 +8,7 @@ const MAP_PREFIX: &str = "catvsrat.map.";
 /// index.html writes a token from a #m=... link here before the game starts.
 const KEY_INCOMING: &str = "catvsrat.incoming";
 const KEY_URL_MAP: &str = "catvsrat.url_map";
-const KEY_IMPORT_JSON: &str = "catvsrat.import_json";
+const KEY_IMPORT_MAP: &str = "catvsrat.import_map";
 const KEY_DEBUG: &str = "catvsrat.debug";
 
 pub fn list_maps() -> Vec<String> {
@@ -15,6 +16,10 @@ pub fn list_maps() -> Vec<String> {
     let mut names: Vec<String> = (0..s.len())
         .filter_map(|i| s.key(i))
         .filter_map(|k| k.strip_prefix(MAP_PREFIX).map(str::to_string))
+        .filter(|name| {
+            s.get(&format!("{MAP_PREFIX}{name}"))
+                .is_some_and(|text| Map::from_text(&text).is_ok())
+        })
         .collect();
     names.sort();
     names
@@ -23,14 +28,14 @@ pub fn list_maps() -> Vec<String> {
 pub fn load_map(name: &str) -> Option<Map> {
     let s = STORAGE.lock().unwrap();
     s.get(&format!("{MAP_PREFIX}{name}"))
-        .and_then(|json| Map::from_json(&json).ok())
+        .and_then(|text| Map::from_text(&text).ok())
 }
 
 pub fn save_map(name: &str, map: &Map) {
     STORAGE
         .lock()
         .unwrap()
-        .set(&format!("{MAP_PREFIX}{name}"), &map.to_json());
+        .set(&format!("{MAP_PREFIX}{name}"), &map.to_text());
 }
 
 pub fn rename_map(old_name: &str, new_name: &str) -> Result<(), &'static str> {
@@ -48,13 +53,13 @@ pub fn rename_map(old_name: &str, new_name: &str) -> Result<(), &'static str> {
     let old_key = format!("{MAP_PREFIX}{old_name}");
     let new_key = format!("{MAP_PREFIX}{new_name}");
     let mut s = STORAGE.lock().unwrap();
-    let Some(json) = s.get(&old_key) else {
+    let Some(text) = s.get(&old_key) else {
         return Err("Map no longer exists.");
     };
     if s.get(&new_key).is_some() {
         return Err("A map with that name already exists.");
     }
-    s.set(&new_key, &json);
+    s.set(&new_key, &text);
     s.remove(&old_key);
     Ok(())
 }
@@ -94,9 +99,9 @@ pub fn take_url_map() -> Option<String> {
     take_value(KEY_URL_MAP)
 }
 
-/// Returns and clears JSON supplied by the asynchronous browser clipboard read.
-pub fn take_import_json() -> Option<String> {
-    take_value(KEY_IMPORT_JSON)
+/// Returns and clears map text supplied by the asynchronous clipboard read.
+pub fn take_import_map() -> Option<String> {
+    take_value(KEY_IMPORT_MAP)
 }
 
 pub fn debug_enabled() -> bool {

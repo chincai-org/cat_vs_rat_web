@@ -1,4 +1,4 @@
-//! Share links use compact versioned payloads; legacy JSON-based tokens remain supported.
+//! Share links use compact versioned payloads.
 
 use crate::map::{COLS, Cell, Map, MapError, ROWS};
 
@@ -232,29 +232,26 @@ fn decode_packed_map(bytes: &[u8]) -> Result<Map, MapError> {
 }
 
 pub fn token_from_map(map: &Map) -> String {
-    let bytes =
-        encode_packed_map(map).unwrap_or_else(|| map.to_json().into_bytes());
+    // Only validated maps are shared, and validation guarantees the packed
+    // encoding can represent them.
+    let bytes = encode_packed_map(map).expect("only valid maps are shared");
     encode(&bytes)
 }
 
-/// Decode versioned compact shares and legacy JSON-based shares.
+/// Decode a compact share token.
 pub fn map_from_token(token: &str) -> Result<Map, MapError> {
     if token.is_empty() || token.len() > MAX_TOKEN_LEN {
         return Err(MapError::BadLink);
     }
     let bytes = decode(token).ok_or(MapError::BadLink)?;
-    if bytes.starts_with(PACKED_MAGIC) {
-        return decode_packed_map(&bytes);
-    }
-    let json = String::from_utf8(bytes).map_err(|_| MapError::BadLink)?;
-    Map::from_json(&json)
+    decode_packed_map(&bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const MAP_1: &str = include_str!("../../../maps/map_1.json");
+    const MAP_1: &str = include_str!("../../../maps/map_1.txt");
 
     #[test]
     fn base64_round_trip() {
@@ -267,26 +264,18 @@ mod tests {
 
     #[test]
     fn map_round_trip() {
-        let m = Map::from_json(MAP_1).unwrap();
+        let m = Map::from_text(MAP_1).unwrap();
         assert_eq!(map_from_token(&token_from_map(&m)).unwrap(), m);
     }
 
     #[test]
     fn packed_share_tokens_are_shorter_and_round_trip() {
-        let map = Map::from_json(MAP_1).unwrap();
+        let map = Map::from_text(MAP_1).unwrap();
         let token = token_from_map(&map);
-        let legacy_token = encode(map.to_json().as_bytes());
+        let text_token = encode(map.to_text().as_bytes());
 
-        assert!(token.len() < legacy_token.len());
+        assert!(token.len() < text_token.len());
         assert!(decode(&token).unwrap().starts_with(PACKED_MAGIC));
-        assert_eq!(map_from_token(&token).unwrap(), map);
-    }
-
-    #[test]
-    fn legacy_json_share_tokens_remain_compatible() {
-        let map = Map::from_json(MAP_1).unwrap();
-        let token = encode(map.to_json().as_bytes());
-
         assert_eq!(map_from_token(&token).unwrap(), map);
     }
 
@@ -321,6 +310,6 @@ mod tests {
             map_from_token(&"A".repeat(MAX_TOKEN_LEN + 1)),
             Err(MapError::BadLink)
         );
-        assert!(map_from_token(&encode(b"not json")).is_err());
+        assert!(map_from_token(&encode(b"not a map")).is_err());
     }
 }

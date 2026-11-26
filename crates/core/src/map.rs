@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 
@@ -8,9 +7,8 @@ pub const ROWS: i32 = 10;
 /// A grid cell as [x, y].
 pub type Cell = [i32; 2];
 
-/// Same JSON shape as the original game's maps/map_N.json. Missing keys default to empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase", default)]
+/// One symbol per cell, 20 columns by 10 rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Map {
     pub boxes: Vec<Cell>,
     pub cats: Vec<Cell>,
@@ -29,7 +27,7 @@ pub enum MapError {
     NoCat,
     NoRat,
     NoTomato,
-    Json(String),
+    Text(String),
     BadLink,
 }
 
@@ -48,7 +46,7 @@ impl fmt::Display for MapError {
             MapError::NoCat => write!(f, "Add at least one cat."),
             MapError::NoRat => write!(f, "Add at least one rat."),
             MapError::NoTomato => write!(f, "Add at least one tomato."),
-            MapError::Json(e) => write!(f, "Could not read the map: {e}"),
+            MapError::Text(e) => write!(f, "Could not read the map text: {e}"),
             MapError::BadLink => {
                 write!(f, "This share link is not a valid map.")
             }
@@ -56,18 +54,118 @@ impl fmt::Display for MapError {
     }
 }
 
+fn text_error(line: usize, column: usize, message: &str) -> MapError {
+    MapError::Text(format!(
+        "line {}, column {}: {message}",
+        line + 1,
+        column + 1
+    ))
+}
+
 impl Map {
-    pub fn from_json(s: &str) -> Result<Map, MapError> {
-        let map: Map = serde_json::from_str(s)
-            .map_err(|e| MapError::Json(e.to_string()))?;
+    /// Read the canonical 20x10 symbol grid.
+    pub fn from_text(s: &str) -> Result<Map, MapError> {
+        let mut lines: Vec<&str> = s.lines().collect();
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+        if lines.len() != ROWS as usize {
+            return Err(MapError::Text(format!(
+                "expected {ROWS} lines, found {}",
+                lines.len()
+            )));
+        }
+
+        let mut map = Map::default();
+        for (y, line) in lines.iter().enumerate() {
+            let bytes = line.as_bytes();
+            if bytes.len() != COLS as usize {
+                return Err(MapError::Text(format!(
+                    "line {}: expected {COLS} columns, found {}",
+                    y + 1,
+                    bytes.len()
+                )));
+            }
+            for (x, &symbol) in bytes.iter().enumerate() {
+                let cell = [x as i32, y as i32];
+                match symbol {
+                    b'.' => {}
+                    b'#' => map.boxes.push(cell),
+                    b'C' => map.cats.push(cell),
+                    b'R' => map.rats.push(cell),
+                    b'T' => map.tomatoes.push(cell),
+                    b'S' => map.spikes.push(cell),
+                    b'[' => {
+                        if bytes.get(x + 1) != Some(&b']') {
+                            return Err(text_error(
+                                y,
+                                x,
+                                "'[' must be followed by ']'",
+                            ));
+                        }
+                        map.holes.push(cell);
+                    }
+                    b']' => {
+                        if x == 0 || bytes[x - 1] != b'[' {
+                            return Err(text_error(
+                                y,
+                                x,
+                                "']' must follow '['",
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(text_error(
+                            y,
+                            x,
+                            &format!("unknown symbol '{}'", other as char),
+                        ));
+                    }
+                }
+            }
+        }
+
         match map.validate().into_iter().next() {
             Some(e) => Err(e),
             None => Ok(map),
         }
     }
 
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("a map always serializes")
+    /// Write the canonical 20x10 symbol grid. Every cell is one character.
+    pub fn to_text(&self) -> String {
+        debug_assert!(
+            self.validate().is_empty(),
+            "only valid maps convert to text"
+        );
+        let mut rows = [[b'.'; COLS as usize]; ROWS as usize];
+        for &[x, y] in &self.boxes {
+            rows[y as usize][x as usize] = b'#';
+        }
+        for &[x, y] in &self.cats {
+            rows[y as usize][x as usize] = b'C';
+        }
+        for &[x, y] in &self.rats {
+            rows[y as usize][x as usize] = b'R';
+        }
+        for &[x, y] in &self.tomatoes {
+            rows[y as usize][x as usize] = b'T';
+        }
+        for &[x, y] in &self.spikes {
+            rows[y as usize][x as usize] = b'S';
+        }
+        for &[x, y] in &self.holes {
+            rows[y as usize][x as usize] = b'[';
+            rows[y as usize][x as usize + 1] = b']';
+        }
+
+        let mut out = String::with_capacity(((COLS + 1) * ROWS) as usize);
+        for row in rows {
+            for symbol in row {
+                out.push(symbol as char);
+            }
+            out.push('\n');
+        }
+        out
     }
 
     pub fn in_bounds(x: i32, y: i32) -> bool {
@@ -249,11 +347,11 @@ fn reachable_cells(
 mod tests {
     use super::*;
 
-    const MAP_1: &str = include_str!("../../../maps/map_1.json");
+    const MAP_1: &str = include_str!("../../../maps/map_1.txt");
 
     #[test]
     fn map_1_loads_unchanged() {
-        let m = Map::from_json(MAP_1).unwrap();
+        let m = Map::from_text(MAP_1).unwrap();
         assert_eq!(
             (m.boxes.len(), m.cats.len(), m.rats.len(), m.tomatoes.len()),
             (38, 4, 6, 6)
@@ -262,18 +360,51 @@ mod tests {
     }
 
     #[test]
-    fn json_round_trip() {
-        let m = Map::from_json(MAP_1).unwrap();
-        assert_eq!(Map::from_json(&m.to_json()).unwrap(), m);
+    fn text_round_trip() {
+        let m = Map::from_text(MAP_1).unwrap();
+        assert_eq!(Map::from_text(&m.to_text()).unwrap(), m);
     }
 
     #[test]
-    fn missing_keys_default_to_empty() {
-        let m = Map::from_json(
-            r#"{"Cats":[[0,0]],"Rats":[[1,0]],"Tomatoes":[[2,0]]}"#,
-        )
-        .unwrap();
-        assert!(m.boxes.is_empty());
+    fn text_round_trip_keeps_holes_and_spikes() {
+        let m = Map {
+            boxes: vec![[9, 8], [1, 1]],
+            cats: vec![[15, 8], [0, 9]],
+            rats: vec![[12, 2], [3, 7], [18, 1]],
+            tomatoes: vec![[6, 4], [12, 7]],
+            holes: vec![[18, 9], [3, 6]],
+            spikes: vec![[17, 9]],
+        };
+        assert_eq!(
+            Map::from_text(&m.to_text()).unwrap().to_text(),
+            m.to_text()
+        );
+    }
+
+    #[test]
+    fn text_rejects_bad_grids() {
+        let short_line = ".".repeat(COLS as usize - 1);
+        let ok_line = ".".repeat(COLS as usize);
+        let mut lines = vec![ok_line.clone(); ROWS as usize];
+        lines[0] = short_line;
+        assert!(matches!(
+            Map::from_text(&lines.join("\n")),
+            Err(MapError::Text(_))
+        ));
+
+        lines[0] = ok_line.clone();
+        lines[1].replace_range(0..1, "X");
+        assert!(matches!(
+            Map::from_text(&lines.join("\n")),
+            Err(MapError::Text(_))
+        ));
+
+        lines[1] = ok_line;
+        lines[2].replace_range(0..1, "[");
+        assert!(matches!(
+            Map::from_text(&lines.join("\n")),
+            Err(MapError::Text(_))
+        ));
     }
 
     #[test]
@@ -358,6 +489,5 @@ mod tests {
             map.validate()
                 .contains(&MapError::OutOfBounds { x: i32::MAX, y: 0 })
         );
-        assert!(Map::from_json(&map.to_json()).is_err());
     }
 }
