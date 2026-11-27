@@ -5,7 +5,7 @@ Includes an in-browser map editor with local saving and share links.
 
 ## Run
 
-- Tests:   cargo test -p cat_vs_rat_core
+- Tests:   cargo test --workspace
 - Desktop: cargo run -p cat-vs-rat (run from the repo root so Assets/ is found)
 - Web:     ./build-web.sh && python3 -m http.server -d dist 8000
 - Pages:   push to main, then Settings > Pages > Source: GitHub Actions
@@ -71,7 +71,7 @@ are stored in the browser's localStorage (a local file on desktop).
 
 ## Editor and browser features
 
-Custom maps can be renamed, copied as text, and imported from clipboard with **Paste map**. The editor warns when a cat cannot reach any rat, a rat cannot reach any tomato, or a tomato cannot be reached by any rat. During a round, the HUD counts down to the next cat removal. Movement is keyboard-only: arrow keys for cats and WASD for rats by default. Open **Controls** on the main menu to rebind either side; changes are saved locally and can be reset to defaults.
+Custom maps can be renamed, copied as text, and imported from clipboard with **Paste map**. The editor warns when a cat cannot reach any rat, a rat cannot reach any tomato, or a tomato cannot be reached by any rat. During a round, the HUD counts down to the next cat removal. Movement is keyboard-only: arrow keys for cats and WASD for rats by default. Open **Controls** on the main menu to rebind either side; changes are saved locally and can be reset to defaults. P and Q stay reserved for the round hotkeys. Music volume and mute controls are on the main, pause, and game-over screens.
 
 ### URL parameters
 
@@ -118,13 +118,14 @@ Custom maps can be renamed, copied as text, and imported from clipboard with **P
 
 ## More
 
-[Asset source](https://comigo.itch.io/farm-puzzle-animals)
-Play the game at this repository's GitHub Pages site.
+Play the game at this repository's [GitHub Pages site](https://chincai-org.github.io/cat_vs_rat_web/).
 
 ## License
 
 Source code is licensed under the [Apache License 2.0](LICENSE).
 
 Game art and audio in `Assets/` come from
-[Farm Puzzle Animals](https://comigo.itch.io/farm-puzzle-animals) and remain
-under the asset author's terms; the Apache license covers the code only.
+[Farm Puzzle Animals](https://comigo.itch.io/farm-puzzle-animals). The itch.io
+listing licenses the pack under
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/). The Apache
+license covers the code only.

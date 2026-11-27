@@ -12,6 +12,8 @@ const KEY_INCOMING: &str = "catvsrat.incoming";
 const KEY_URL_MAP: &str = "catvsrat.url_map";
 const KEY_IMPORT_MAP: &str = "catvsrat.import_map";
 const KEY_DEBUG: &str = "catvsrat.debug";
+const KEY_VOLUME: &str = "catvsrat.volume";
+const KEY_MUTED: &str = "catvsrat.muted";
 
 pub fn list_maps() -> Vec<String> {
     let s = STORAGE.lock().unwrap();
@@ -108,6 +110,24 @@ pub fn take_import_map() -> Option<String> {
 
 pub fn debug_enabled() -> bool {
     STORAGE.lock().unwrap().get(KEY_DEBUG).as_deref() == Some("1")
+}
+
+/// Music volume in 0..=1 plus the mute toggle.
+pub fn load_audio() -> (f32, bool) {
+    let s = STORAGE.lock().unwrap();
+    let volume = s
+        .get(KEY_VOLUME)
+        .and_then(|text| text.parse::<f32>().ok())
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    let muted = s.get(KEY_MUTED).as_deref() == Some("1");
+    (volume, muted)
+}
+
+pub fn save_audio(volume: f32, muted: bool) {
+    let mut s = STORAGE.lock().unwrap();
+    s.set(KEY_VOLUME, &format!("{volume:.2}"));
+    s.set(KEY_MUTED, if muted { "1" } else { "0" });
 }
 
 pub fn load_keymap() -> KeyMap {

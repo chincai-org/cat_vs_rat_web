@@ -61,8 +61,6 @@ const BINDABLE_KEYS: &[KeyCode] = &[
     KeyCode::M,
     KeyCode::N,
     KeyCode::O,
-    KeyCode::P,
-    KeyCode::Q,
     KeyCode::R,
     KeyCode::S,
     KeyCode::T,
@@ -174,7 +172,8 @@ impl KeyMap {
         *self = KeyMap::default();
     }
 
-    /// Keys used by pause, dialogs, and menu navigation stay available.
+    /// Keys used by pause, dialogs, menu navigation, and the round hotkeys
+    /// stay available.
     pub fn reserved(key: KeyCode) -> bool {
         matches!(
             key,
@@ -182,6 +181,8 @@ impl KeyMap {
                 | KeyCode::Enter
                 | KeyCode::Tab
                 | KeyCode::Backspace
+                | KeyCode::P
+                | KeyCode::Q
         )
     }
 
@@ -217,7 +218,14 @@ impl KeyMap {
             cat: parse_side(cat)?,
             rat: parse_side(rat)?,
         };
-        keymap.has_unique_keys().then_some(keymap)
+        (keymap.has_unique_keys() && keymap.avoids_reserved()).then_some(keymap)
+    }
+
+    fn avoids_reserved(&self) -> bool {
+        self.cat
+            .iter()
+            .chain(self.rat.iter())
+            .all(|key| !KeyMap::reserved(*key))
     }
 
     fn has_unique_keys(&self) -> bool {
@@ -304,6 +312,9 @@ mod tests {
         );
         assert_eq!(KeyMap::from_storage("Up,Up,Left,Right;W,S,A,D"), None);
         assert_eq!(KeyMap::from_storage("Up,Down,Left,Right;W,S,A,Up"), None);
+        // P and Q are round hotkeys, so stored bindings may not use them.
+        assert_eq!(KeyMap::from_storage("P,Down,Left,Right;W,S,A,D"), None);
+        assert_eq!(KeyMap::from_storage("Up,Down,Left,Right;W,S,A,Q"), None);
     }
 
     #[test]
@@ -337,6 +348,8 @@ mod tests {
             KeyCode::Enter,
             KeyCode::Tab,
             KeyCode::Backspace,
+            KeyCode::P,
+            KeyCode::Q,
         ] {
             assert!(KeyMap::reserved(key));
         }

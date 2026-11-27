@@ -239,8 +239,26 @@ pub fn draw_board_bg(v: &View, a: &Assets, cell: f32, ox: f32, oy: f32) {
     }
 }
 
+/// Blend the previous fixed-step position with the current one.
+fn render_pos(current: f32, previous: f32, alpha: f32) -> f32 {
+    debug_assert!((0.0..=1.0).contains(&alpha));
+    previous + (current - previous) * alpha
+}
+
 /// Draw projected sprites back-to-front by their ground position.
-pub fn draw_game(v: &View, a: &Assets, g: &Game, cell: f32, ox: f32, oy: f32) {
+///
+/// `alpha` is the fraction of the next fixed step already elapsed, in 0..=1.
+/// Passing 1.0 draws the current simulation state.
+pub fn draw_game(
+    v: &View,
+    a: &Assets,
+    g: &Game,
+    cell: f32,
+    ox: f32,
+    oy: f32,
+    alpha: f32,
+) {
+    let alpha = alpha.clamp(0.0, 1.0);
     draw_board_bg(v, a, cell, ox, oy);
     for hole in &g.holes {
         v.art(
@@ -258,11 +276,13 @@ pub fn draw_game(v: &View, a: &Assets, g: &Game, cell: f32, ox: f32, oy: f32) {
         let mut sprites = scratch.borrow_mut();
         sprites.clear();
         for cat in &g.cats {
+            let x = render_pos(cat.x, cat.prev_x, alpha);
+            let y = render_pos(cat.y, cat.prev_y, alpha);
             sprites.push(Sprite {
-                depth: cat.y + 1.0,
+                depth: y + 1.0,
                 kind: SpriteKind::Cat,
-                x: cat.x,
-                y: cat.y,
+                x,
+                y,
             });
         }
         for rat in &g.rats {
@@ -271,11 +291,13 @@ pub fn draw_game(v: &View, a: &Assets, g: &Game, cell: f32, ox: f32, oy: f32) {
             } else {
                 SpriteKind::RatDead
             };
+            let x = render_pos(rat.x, rat.prev_x, alpha);
+            let y = render_pos(rat.y, rat.prev_y, alpha);
             sprites.push(Sprite {
-                depth: rat.y + 1.0,
+                depth: y + 1.0,
                 kind,
-                x: rat.x,
-                y: rat.y,
+                x,
+                y,
             });
         }
         for &[x, y] in &g.boxes {

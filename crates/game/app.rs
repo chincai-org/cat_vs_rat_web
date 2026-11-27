@@ -7,13 +7,18 @@ use crate::store;
 use crate::view::{H, View, W, draw_board_bg, draw_game};
 use cat_vs_rat_core::{Dir, FIXED_DT, Game, Input, Map, Outcome, share};
 use macroquad::audio::{
-    PlaySoundParams, Sound, load_sound, play_sound, play_sound_once,
+    PlaySoundParams, Sound, load_sound, play_sound, set_sound_volume,
 };
 use macroquad::experimental::coroutines::{Coroutine, start_coroutine};
 use macroquad::prelude::*;
 
 const BUILTIN_MAP: &str = include_str!("../../maps/map_1.txt");
 const PER_PAGE: usize = 6;
+/// The four countdown beeps land at 0, 1, 2 and 3 seconds.
+const COUNTDOWN_SECS: f32 = 3.0;
+/// Keep "GO!" on screen briefly once the simulation is live.
+const GO_OVERLAY_SECS: f32 = 0.6;
+const VOLUME_STEP: f32 = 0.1;
 /// Map-list row actions share one width and pitch so every button lines up.
 const ROW_BUTTON_X: f32 = 500.0;
 const ROW_BUTTON_W: f32 = 120.0;
@@ -146,19 +151,8 @@ pub struct App {
     shared: Option<Map>,
     /// Mixed into the clock so two rounds started in the same millisecond differ.
     seed_counter: u64,
-}
-
-fn new_round(a: &Assets, map: Map, back: Back, seed: u64) -> Round {
-    if let Some(s) = &a.countdown {
-        play_sound_once(s);
-    }
-    Round {
-        game: Game::new(&map, seed),
-        map,
-        back,
-        acc: 0.0,
-        started_at: get_time(),
-    }
+    volume: f32,
+    muted: bool,
 }
 
 async fn load_music() -> Option<Sound> {
@@ -293,6 +287,7 @@ impl App {
     pub fn new(assets: Assets) -> App {
         let url_map = store::take_url_map();
         let incoming = store::take_incoming();
+        let (volume, muted) = store::load_audio();
         App {
             assets,
             screen: Screen::Menu,
@@ -313,6 +308,8 @@ impl App {
             debug: store::debug_enabled(),
             keymap: store::load_keymap(),
             seed_counter: 0,
+            volume,
+            muted,
         }
     }
 
@@ -322,11 +319,84 @@ impl App {
         now_ms ^ self.seed_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
     }
 
+    fn new_round(&self, map: Map, back: Back, seed: u64) -> Round {
+        if let Some(countdown) = &self.assets.countdown {
+            play_sound(
+                countdown,
+                PlaySoundParams {
+                    looped: false,
+                    volume: self.effective_volume(),
+                },
+            );
+        }
+        Round {
+            game: Game::new(&map, seed),
+            map,
+            back,
+            acc: 0.0,
+            started_at: get_time(),
+        }
+    }
+
+    fn effective_volume(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
+
+    fn apply_audio_volume(&self) {
+        let volume = self.effective_volume();
+        if let Some(music) = &self.music {
+            set_sound_volume(music, volume);
+        }
+        if let Some(countdown) = &self.assets.countdown {
+            set_sound_volume(countdown, volume);
+        }
+    }
+
+    fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        store::save_audio(self.volume, self.muted);
+        self.apply_audio_volume();
+    }
+
+    fn toggle_mute(&mut self) {
+        self.muted = !self.muted;
+        store::save_audio(self.volume, self.muted);
+        self.apply_audio_volume();
+    }
+
+    /// Draw volume controls and apply any click immediately.
+    fn audio_controls(&mut self, v: &View, x: f32, y: f32) {
+        let percent = (self.volume * 100.0).round() as u32;
+        let label = if self.muted {
+            format!("UNMUTE {percent}%")
+        } else {
+            format!("MUTE {percent}%")
+        };
+        let (down, up, toggle) = {
+            let a = &self.assets;
+            (
+                v.button(&a.font, "VOL -", x, y, 90.0, 36.0, true),
+                v.button(&a.font, "VOL +", x + 96.0, y, 90.0, 36.0, true),
+                v.button(&a.font, &label, x + 192.0, y, 150.0, 36.0, true),
+            )
+        };
+        if down {
+            self.set_volume(self.volume - VOLUME_STEP);
+        }
+        if up {
+            self.set_volume(self.volume + VOLUME_STEP);
+        }
+        if toggle {
+            self.toggle_mute();
+        }
+    }
+
     /// Collect the countdown beep once its background load finishes.
     fn poll_countdown(&mut self) {
         if self.countdown_pending.as_ref().is_some_and(|c| c.is_done()) {
             if let Some(pending) = self.countdown_pending.take() {
                 self.assets.countdown = pending.retrieve().flatten();
+                self.apply_audio_volume();
             }
         }
     }
@@ -354,7 +424,7 @@ impl App {
                 music,
                 PlaySoundParams {
                     looped: true,
-                    volume: 0.5,
+                    volume: self.effective_volume(),
                 },
             );
             self.music_started = true;
@@ -393,6 +463,16 @@ impl App {
         } else {
             None
         };
+        // An empty clipboard is a cancel, not a map with zero lines.
+        let imported = match imported {
+            Some(text) if text.trim().is_empty() => {
+                if let Screen::MapList(state) = &mut self.screen {
+                    state.message = Some("Paste cancelled.".to_string());
+                }
+                None
+            }
+            other => other,
+        };
         let screen = match imported {
             Some(text) => match Map::from_text(&text) {
                 Ok(map) => Screen::Editor(EditorScreen::imported(map)),
@@ -430,16 +510,15 @@ impl App {
             Screen::Menu => self.menu(v),
             Screen::Controls(st) => self.controls(v, st),
             Screen::MapList(st) => self.map_list(v, st),
-            Screen::Editor(mut ed) => match ed.frame(v, &self.assets) {
-                EditorAction::Stay => Screen::Editor(ed),
-                EditorAction::Back => Screen::MapList(ListState::new()),
-                EditorAction::Test(map) => Screen::Countdown(new_round(
-                    &self.assets,
-                    map,
-                    Back::Editor(Box::new(ed)),
-                    seed,
-                )),
-            },
+            Screen::Editor(mut ed) => {
+                match ed.frame(v, &self.assets) {
+                    EditorAction::Stay => Screen::Editor(ed),
+                    EditorAction::Back => Screen::MapList(ListState::new()),
+                    EditorAction::Test(map) => Screen::Countdown(
+                        self.new_round(map, Back::Editor(Box::new(ed)), seed),
+                    ),
+                }
+            }
             Screen::Countdown(round) => self.countdown(v, round),
             Screen::Playing(round) => self.playing(v, round),
             Screen::Paused(round) => self.paused(v, round),
@@ -479,8 +558,7 @@ impl App {
                 YELLOW,
             );
             if v.button(&a.font, "Play it", 400.0, 440.0, 150.0, 44.0, true) {
-                next = Screen::Countdown(new_round(
-                    a,
+                next = Screen::Countdown(self.new_round(
                     shared.clone(),
                     Back::List,
                     seed,
@@ -512,6 +590,7 @@ impl App {
             KeyMap::label(self.keymap.key(Side::Rat, Dir::Right)),
         );
         v.text_centered(&a.font, &hint, W / 2.0, 550.0, 22, WHITE);
+        self.audio_controls(v, 469.0, 596.0);
         next
     }
 
@@ -694,8 +773,7 @@ impl App {
                 !modal,
             ) {
                 if let Some(map) = load() {
-                    next = Some(Screen::Countdown(new_round(
-                        a,
+                    next = Some(Screen::Countdown(self.new_round(
                         map,
                         Back::List,
                         seed,
@@ -735,9 +813,10 @@ impl App {
                 if let Some(map) = load() {
                     let token = share::token_from_map(&map);
                     copy_share_link(&token);
+                    // The async clipboard result is reported by the JS toast.
                     #[cfg(target_arch = "wasm32")]
                     {
-                        st.message = Some("Copying share link...".to_string());
+                        st.message = None;
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -758,9 +837,10 @@ impl App {
             ) {
                 if let Some(map) = load() {
                     copy_map(&map.to_text());
+                    // The async clipboard result is reported by the JS toast.
                     #[cfg(target_arch = "wasm32")]
                     {
-                        st.message = Some("Copying map text...".to_string());
+                        st.message = None;
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -924,15 +1004,17 @@ impl App {
     fn countdown(&mut self, v: &View, round: Round) -> Screen {
         let a = &self.assets;
         let t = (get_time() - round.started_at) as f32;
-        draw_game(v, a, &round.game, 64.0, 0.0, 0.0);
+        draw_game(v, a, &round.game, 64.0, 0.0, 0.0, 1.0);
         draw_round_hud(v, a, &round, self.debug);
-        let label = if t < 3.0 {
-            format!("{}", 3 - t as i32)
+        let label = if t < 1.0 {
+            "3"
+        } else if t < 2.0 {
+            "2"
         } else {
-            "GO!".to_string()
+            "1"
         };
-        v.text_centered(&a.font, &label, W / 2.0, H / 2.0 + 70.0, 200, BLACK);
-        if t >= 4.0 {
+        v.text_centered(&a.font, label, W / 2.0, H / 2.0 + 70.0, 200, BLACK);
+        if t >= COUNTDOWN_SECS {
             Screen::Playing(round)
         } else {
             Screen::Countdown(round)
@@ -950,8 +1032,24 @@ impl App {
             outcome = round.game.step(&input);
             round.acc -= FIXED_DT;
         }
-        draw_game(v, &self.assets, &round.game, 64.0, 0.0, 0.0);
+        let alpha = if outcome.is_some() {
+            1.0
+        } else {
+            (round.acc / FIXED_DT).clamp(0.0, 1.0)
+        };
+        draw_game(v, &self.assets, &round.game, 64.0, 0.0, 0.0, alpha);
         draw_round_hud(v, &self.assets, &round, self.debug);
+        let elapsed = (get_time() - round.started_at) as f32;
+        if elapsed < COUNTDOWN_SECS + GO_OVERLAY_SECS {
+            v.text_centered(
+                &self.assets.font,
+                "GO!",
+                W / 2.0,
+                H / 2.0 + 70.0,
+                200,
+                BLACK,
+            );
+        }
         match outcome {
             Some(o) => Screen::Over(round, o),
             None => Screen::Playing(round),
@@ -960,7 +1058,7 @@ impl App {
 
     fn paused(&mut self, v: &View, round: Round) -> Screen {
         let a = &self.assets;
-        draw_game(v, a, &round.game, 64.0, 0.0, 0.0);
+        draw_game(v, a, &round.game, 64.0, 0.0, 0.0, 1.0);
         v.rect(0.0, 0.0, W, H, Color::new(0.0, 0.0, 0.0, 0.68));
         draw_round_hud(v, a, &round, self.debug);
         v.text_centered(&a.font, "PAUSED", W / 2.0, 250.0, 64, WHITE);
@@ -978,13 +1076,14 @@ impl App {
                 Back::Editor(ed) => Screen::Editor(*ed),
             };
         }
+        self.audio_controls(v, 469.0, 390.0);
         Screen::Paused(round)
     }
 
     fn over(&mut self, v: &View, round: Round, outcome: Outcome) -> Screen {
         let seed = self.next_seed();
         let a = &self.assets;
-        draw_game(v, a, &round.game, 64.0, 0.0, 0.0);
+        draw_game(v, a, &round.game, 64.0, 0.0, 0.0, 1.0);
         v.rect(0.0, 0.0, W, H, Color::new(0.0, 0.0, 0.0, 0.68));
         draw_round_hud(v, a, &round, self.debug);
         let msg = match outcome {
@@ -996,9 +1095,9 @@ impl App {
         if toolbar_button(v, a, "PLAY AGAIN (P)", 180.0, 270.0)
             || is_key_pressed(KeyCode::P)
         {
-            return Screen::Countdown(new_round(
-                a, round.map, round.back, seed,
-            ));
+            return Screen::Countdown(
+                self.new_round(round.map, round.back, seed),
+            );
         }
         if toolbar_button(v, a, "MENU (Q)", 780.0, 270.0)
             || is_key_pressed(KeyCode::Q)
@@ -1008,6 +1107,7 @@ impl App {
                 Back::Editor(ed) => Screen::Editor(*ed),
             };
         }
+        self.audio_controls(v, 469.0, 390.0);
         Screen::Over(round, outcome)
     }
 }

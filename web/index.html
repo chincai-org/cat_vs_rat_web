@@ -13,10 +13,14 @@
 			#share-status { position: fixed; right: 8px; bottom: 8px; z-index: 5; display: none; pointer-events: none;
 				font: 14px sans-serif; padding: 8px 12px; color: #fff; background: #222;
 				border-radius: 6px; }
+			#loading { position: fixed; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center;
+				pointer-events: none; color: #eee; background: #000;
+				font: 20px sans-serif; letter-spacing: 0.04em; }
 		</style>
 	</head>
 	<body>
 		<canvas id="glcanvas" tabindex="1"></canvas>
+		<div id="loading" role="status">Loading…</div>
 		<div id="share-status" role="status" aria-live="polite"></div>
 
 		<script>
@@ -46,12 +50,23 @@
 		<script src="quad-storage.js"></script>
 		<script>
 			const status = document.getElementById("share-status");
+			let statusTimer = 0;
+			const hideStatus = () => {
+				status.style.display = "none";
+				status.textContent = "";
+			};
 			const showStatus = (message) => {
+				clearTimeout(statusTimer);
 				status.style.display = "block";
 				status.textContent = message;
+				statusTimer = setTimeout(hideStatus, 4000);
 			};
 			const decodeWasmText = (ptr, len) =>
 				new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, ptr, len));
+
+			importObject.env.cat_vs_rat_ready = () => {
+				document.getElementById("loading").style.display = "none";
+			};
 
 			importObject.env.cat_vs_rat_copy_share_link = async (ptr, len) => {
 				const token = decodeWasmText(ptr, len);
@@ -78,11 +93,13 @@
 			importObject.env.cat_vs_rat_paste_map = async () => {
 				showStatus("Reading map from clipboard...");
 				try {
-					localStorage.setItem("catvsrat.import_map", await navigator.clipboard.readText());
-					showStatus("Map received; importing...");
+					const text = await navigator.clipboard.readText();
+					// An empty key tells Rust the read was cancelled, not malformed.
+					localStorage.setItem("catvsrat.import_map", text);
+					showStatus(text.trim() ? "Map received; importing..." : "Clipboard is empty.");
 				} catch (error) {
 					console.error("Clipboard read failed:", error);
-					// Tell Rust the read failed instead of leaving it waiting forever.
+					// Tell Rust the read ended instead of leaving it waiting forever.
 					try { localStorage.setItem("catvsrat.import_map", ""); } catch (e) {}
 					showStatus(`Paste failed: ${error?.name ?? "unknown error"}.`);
 				}

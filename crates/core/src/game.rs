@@ -102,31 +102,33 @@ pub struct Input {
 pub struct Cat {
     pub x: f32,
     pub y: f32,
+    /// Position before the latest fixed step, for render interpolation.
+    pub prev_x: f32,
+    pub prev_y: f32,
     last_teleport: f32,
+    /// Cleared by a teleport and set again after the sprite leaves a hole.
+    teleport_armed: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct Rat {
     pub x: f32,
     pub y: f32,
+    /// Position before the latest fixed step, for render interpolation.
+    pub prev_x: f32,
+    pub prev_y: f32,
     pub alive: bool,
     died_at: f32,
     vanish_after: f32,
     last_teleport: f32,
+    /// Cleared by a teleport and set again after the sprite leaves a hole.
+    teleport_armed: bool,
 }
 
 /// Collision shapes. Cats and rats are horizontal capsules; tomatoes, boxes,
-/// and spikes are rounded rectangles.
+/// spikes, and holes are rounded rectangles.
 #[derive(Debug, Clone, Copy)]
 enum Collider {
-    /// Kept for tests and as the square baseline for rounded shapes.
-    #[allow(dead_code)]
-    Rect {
-        left: f32,
-        top: f32,
-        right: f32,
-        bottom: f32,
-    },
     /// Axis-aligned rectangle with rounded corners. `corner` is the corner
     /// radius; the flat sides still slide. `solid_y` blocks vertical movement.
     RoundedRect {
@@ -137,10 +139,6 @@ enum Collider {
         corner: f32,
         solid_y: bool,
     },
-    /// Kept for collision helpers and future round shapes; tomatoes now use a
-    /// rounded rectangle.
-    #[allow(dead_code)]
-    Circle { cx: f32, cy: f32, r: f32 },
     /// Horizontal capsule: a segment from `cx - half` to `cx + half` swept by
     /// radius `r`.
     Capsule { cx: f32, cy: f32, r: f32, half: f32 },
@@ -181,44 +179,21 @@ impl Collider {
         }
     }
 
+    /// The ground area of a 2x1 hole, used only to decide when a sprite's feet
+    /// have reached the hole.
+    fn hole(cell: &Cell) -> Self {
+        Self::RoundedRect {
+            left: cell[0] as f32,
+            top: cell[1] as f32 + FOOT_TOP,
+            right: cell[0] as f32 + 2.0,
+            bottom: cell[1] as f32 + FOOT_BOTTOM,
+            corner: CORNER,
+            solid_y: false,
+        }
+    }
+
     fn overlaps(self, other: Self) -> bool {
         match (self, other) {
-            (
-                Self::Rect {
-                    left: a_left,
-                    top: a_top,
-                    right: a_right,
-                    bottom: a_bottom,
-                },
-                Self::Rect {
-                    left: b_left,
-                    top: b_top,
-                    right: b_right,
-                    bottom: b_bottom,
-                },
-            ) => {
-                a_left < b_right + COLLISION_EPSILON
-                    && a_right > b_left - COLLISION_EPSILON
-                    && a_top < b_bottom + COLLISION_EPSILON
-                    && a_bottom > b_top - COLLISION_EPSILON
-            }
-            (
-                Self::Circle {
-                    cx: a_cx,
-                    cy: a_cy,
-                    r: a_r,
-                },
-                Self::Circle {
-                    cx: b_cx,
-                    cy: b_cy,
-                    r: b_r,
-                },
-            ) => {
-                let dx = a_cx - b_cx;
-                let dy = a_cy - b_cy;
-                let radius = a_r + b_r;
-                dx * dx + dy * dy < radius * radius + COLLISION_EPSILON
-            }
             (
                 Self::Capsule { cx, cy, r, half },
                 Self::Capsule {
@@ -236,61 +211,6 @@ impl Collider {
             }
             (
                 Self::Capsule { cx, cy, r, half },
-                Self::Circle {
-                    cx: ox,
-                    cy: oy,
-                    r: or,
-                },
-            ) => {
-                let dx = (cx - ox).abs() - half;
-                let dy = cy - oy;
-                let radius = r + or;
-                let dx = dx.max(0.0);
-                dx * dx + dy * dy < radius * radius + COLLISION_EPSILON
-            }
-            (
-                Self::Circle { cx, cy, r },
-                Self::Capsule {
-                    cx: ox,
-                    cy: oy,
-                    r: or,
-                    half,
-                },
-            ) => {
-                let dx = (cx - ox).abs() - half;
-                let dy = cy - oy;
-                let radius = r + or;
-                let dx = dx.max(0.0);
-                dx * dx + dy * dy < radius * radius + COLLISION_EPSILON
-            }
-            (
-                Self::Capsule { cx, cy, r, half },
-                Self::Rect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                },
-            ) => {
-                capsule_rect_overlap(cx, cy, r, half, left, top, right, bottom)
-            }
-            (rect @ Self::Rect { .. }, capsule @ Self::Capsule { .. }) => {
-                capsule.overlaps(rect)
-            }
-            (
-                Self::Circle { cx, cy, r },
-                Self::Rect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                },
-            ) => circle_rect_overlap(cx, cy, r, left, top, right, bottom),
-            (rect @ Self::Rect { .. }, circle @ Self::Circle { .. }) => {
-                circle.overlaps(rect)
-            }
-            (
-                Self::Capsule { cx, cy, r, half },
                 Self::RoundedRect {
                     left,
                     top,
@@ -314,70 +234,6 @@ impl Collider {
                 Self::Capsule { cx, cy, r, half },
             ) => capsule_rounded_rect_overlap(
                 cx, cy, r, half, left, top, right, bottom, corner,
-            ),
-            (
-                Self::Circle { cx, cy, r },
-                Self::RoundedRect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                    corner,
-                    solid_y: _,
-                },
-            ) => circle_rounded_rect_overlap(
-                cx, cy, r, left, top, right, bottom, corner,
-            ),
-            (
-                Self::RoundedRect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                    corner,
-                    solid_y: _,
-                },
-                Self::Circle { cx, cy, r },
-            ) => circle_rounded_rect_overlap(
-                cx, cy, r, left, top, right, bottom, corner,
-            ),
-            (
-                Self::Rect {
-                    left: a_left,
-                    top: a_top,
-                    right: a_right,
-                    bottom: a_bottom,
-                },
-                Self::RoundedRect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                    corner,
-                    solid_y: _,
-                },
-            ) => rect_rounded_rect_overlap(
-                a_left, a_top, a_right, a_bottom, left, top, right, bottom,
-                corner,
-            ),
-            (
-                Self::RoundedRect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                    corner,
-                    solid_y: _,
-                },
-                Self::Rect {
-                    left: a_left,
-                    top: a_top,
-                    right: a_right,
-                    bottom: a_bottom,
-                },
-            ) => rect_rounded_rect_overlap(
-                a_left, a_top, a_right, a_bottom, left, top, right, bottom,
-                corner,
             ),
             (
                 Self::RoundedRect {
@@ -417,22 +273,6 @@ fn capsule_rect_overlap(
 ) -> bool {
     let dx = (left - (cx + half)).max(cx - half - right).max(0.0);
     let dy = (top - cy).max(cy - bottom).max(0.0);
-    dx * dx + dy * dy < r * r + COLLISION_EPSILON
-}
-
-fn circle_rect_overlap(
-    cx: f32,
-    cy: f32,
-    r: f32,
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-) -> bool {
-    let nearest_x = cx.clamp(left, right);
-    let nearest_y = cy.clamp(top, bottom);
-    let dx = cx - nearest_x;
-    let dy = cy - nearest_y;
     dx * dx + dy * dy < r * r + COLLISION_EPSILON
 }
 
@@ -482,56 +322,6 @@ fn capsule_rounded_rect_overlap(
         inner_right,
         inner_bottom,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn circle_rounded_rect_overlap(
-    cx: f32,
-    cy: f32,
-    r: f32,
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-    corner: f32,
-) -> bool {
-    let (inner_left, inner_top, inner_right, inner_bottom, corner) =
-        rounded_inner(left, top, right, bottom, corner);
-    circle_rect_overlap(
-        cx,
-        cy,
-        r + corner,
-        inner_left,
-        inner_top,
-        inner_right,
-        inner_bottom,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn rect_rounded_rect_overlap(
-    a_left: f32,
-    a_top: f32,
-    a_right: f32,
-    a_bottom: f32,
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-    corner: f32,
-) -> bool {
-    let (inner_left, inner_top, inner_right, inner_bottom, corner) =
-        rounded_inner(left, top, right, bottom, corner);
-    rect_rect_distance(
-        a_left,
-        a_top,
-        a_right,
-        a_bottom,
-        inner_left,
-        inner_top,
-        inner_right,
-        inner_bottom,
-    ) < corner + COLLISION_EPSILON
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -697,10 +487,13 @@ impl Game {
             .map(|c| Rat {
                 x: c[0] as f32,
                 y: c[1] as f32,
+                prev_x: c[0] as f32,
+                prev_y: c[1] as f32,
                 alive: true,
                 died_at: 0.0,
                 vanish_after: rng.range_inclusive(3, 7) as f32,
                 last_teleport: f32::NEG_INFINITY,
+                teleport_armed: true,
             })
             .collect();
         let box_colliders = box_run_colliders(&map.boxes);
@@ -714,7 +507,10 @@ impl Game {
                 .map(|c| Cat {
                     x: c[0] as f32,
                     y: c[1] as f32,
+                    prev_x: c[0] as f32,
+                    prev_y: c[1] as f32,
                     last_teleport: f32::NEG_INFINITY,
+                    teleport_armed: true,
                 })
                 .collect(),
             rats,
@@ -770,16 +566,22 @@ impl Game {
         self.cat_ctl.update(input.cat);
         self.rat_ctl.update(input.rat);
 
+        // Remember the pre-step positions so the renderer can interpolate.
+        for cat in &mut self.cats {
+            cat.prev_x = cat.x;
+            cat.prev_y = cat.y;
+        }
+        for rat in &mut self.rats {
+            rat.prev_x = rat.x;
+            rat.prev_y = rat.y;
+        }
+
         self.move_sprites();
 
-        // Random order decides who wins a same-frame tie.
-        if self.rng.coin() {
-            self.cats_eat_rats();
-            self.rats_eat_tomatoes();
-        } else {
-            self.rats_eat_tomatoes();
-            self.cats_eat_rats();
-        }
+        // Cats resolve first, so a rat killed in this step cannot also eat a
+        // tomato. A same-step cat/rat tie therefore goes to the cat.
+        self.cats_eat_rats();
+        self.rats_eat_tomatoes();
 
         let now = self.time;
         self.rats
@@ -905,82 +707,126 @@ impl Game {
         let mut seams = std::mem::take(&mut self.seam_buf);
         self.fill_static_seams(&mut seams);
         for m in order.drain(..) {
-            let now = self.time;
-            match m {
+            let (x, y, speed, last_teleport, armed) = match m {
                 Mover::Cat(i) => {
-                    let (x, y) = (self.cats[i].x, self.cats[i].y);
-                    if self.on_raised_spike(x, y) {
-                        continue;
-                    }
-                    self.fill_cat_blockers(i, &mut blockers);
-                    let (vx, vy) = self.cat_ctl.movement();
-                    let step = CAT_SPEED * FIXED_DT;
-                    let (mut nx, mut ny) = move_sprite_with_vector(
-                        x,
-                        y,
-                        vx * step,
-                        vy * step,
-                        &blockers,
-                        &seams,
-                    );
-                    let mut teleported = false;
-                    if now - self.cats[i].last_teleport > TELEPORT_COOLDOWN {
-                        if let Some((tx, ty)) =
-                            teleport_target(&self.holes, nx, ny, &blockers)
-                        {
-                            nx = tx;
-                            ny = ty;
-                            teleported = true;
-                        }
-                    }
-                    let cat = &mut self.cats[i];
-                    cat.x = nx;
-                    cat.y = ny;
-                    if teleported {
-                        cat.last_teleport = now;
-                    }
+                    let cat = &self.cats[i];
+                    (
+                        cat.x,
+                        cat.y,
+                        CAT_SPEED,
+                        cat.last_teleport,
+                        cat.teleport_armed,
+                    )
                 }
                 Mover::Rat(i) => {
-                    if !self.rats[i].alive {
+                    let rat = &self.rats[i];
+                    if !rat.alive {
                         continue;
                     }
-                    let (x, y) = (self.rats[i].x, self.rats[i].y);
-                    if self.on_raised_spike(x, y) {
-                        continue;
-                    }
-                    self.fill_rat_blockers(i, &mut blockers);
-                    let (vx, vy) = self.rat_ctl.movement();
-                    let step = RAT_SPEED * FIXED_DT;
-                    let (mut nx, mut ny) = move_sprite_with_vector(
-                        x,
-                        y,
-                        vx * step,
-                        vy * step,
-                        &blockers,
-                        &seams,
-                    );
-                    let mut teleported = false;
-                    if now - self.rats[i].last_teleport > TELEPORT_COOLDOWN {
-                        if let Some((tx, ty)) =
-                            teleport_target(&self.holes, nx, ny, &blockers)
-                        {
-                            nx = tx;
-                            ny = ty;
-                            teleported = true;
-                        }
-                    }
-                    let rat = &mut self.rats[i];
-                    rat.x = nx;
-                    rat.y = ny;
-                    if teleported {
-                        rat.last_teleport = now;
-                    }
+                    (
+                        rat.x,
+                        rat.y,
+                        RAT_SPEED,
+                        rat.last_teleport,
+                        rat.teleport_armed,
+                    )
                 }
+            };
+            if self.on_raised_spike(x, y) {
+                continue;
+            }
+            let (nx, ny, teleported) = self.move_actor(
+                m,
+                x,
+                y,
+                speed,
+                last_teleport,
+                armed,
+                &mut blockers,
+                &seams,
+            );
+            let now = self.time;
+            let on_hole_now = on_hole(&self.holes, nx, ny);
+            // Cats and rats have the same motion fields; keep one update path.
+            macro_rules! settle {
+                ($sprite:expr) => {{
+                    let sprite = $sprite;
+                    sprite.x = nx;
+                    sprite.y = ny;
+                    sprite.teleport_armed = if teleported {
+                        false
+                    } else if on_hole_now {
+                        armed
+                    } else {
+                        true
+                    };
+                    if teleported {
+                        sprite.last_teleport = now;
+                        // Do not interpolate across the teleport.
+                        sprite.prev_x = nx;
+                        sprite.prev_y = ny;
+                    }
+                }};
+            }
+            match m {
+                Mover::Cat(i) => settle!(&mut self.cats[i]),
+                Mover::Rat(i) => settle!(&mut self.rats[i]),
             }
         }
         self.order_buf = order;
         self.blocker_buf = blockers;
         self.seam_buf = seams;
+    }
+
+    /// Move one actor, then teleport it when its feet are on a hole and it has
+    /// not just come out of one.
+    #[allow(clippy::too_many_arguments)]
+    fn move_actor(
+        &self,
+        mover: Mover,
+        x: f32,
+        y: f32,
+        speed: f32,
+        last_teleport: f32,
+        armed: bool,
+        blockers: &mut Vec<Collider>,
+        seams: &[Seam],
+    ) -> (f32, f32, bool) {
+        debug_assert!(speed > 0.0);
+        debug_assert!(x.is_finite() && y.is_finite());
+        match mover {
+            Mover::Cat(i) => self.fill_cat_blockers(i, blockers),
+            Mover::Rat(i) => self.fill_rat_blockers(i, blockers),
+        }
+        let (vx, vy) = match mover {
+            Mover::Cat(_) => self.cat_ctl.movement(),
+            Mover::Rat(_) => self.rat_ctl.movement(),
+        };
+        let step = speed * FIXED_DT;
+        let (mut nx, mut ny) = move_sprite_with_vector(
+            x,
+            y,
+            vx * step,
+            vy * step,
+            blockers,
+            seams,
+        );
+        let reached_hole = on_hole(&self.holes, nx, ny);
+        let may_teleport = armed
+            && reached_hole
+            && self.time - last_teleport > TELEPORT_COOLDOWN;
+        let mut teleported = false;
+        if may_teleport {
+            if let Some((tx, ty)) =
+                teleport_target(&self.holes, nx, ny, blockers)
+            {
+                nx = tx;
+                ny = ty;
+                teleported = true;
+            }
+        }
+        debug_assert!(nx.is_finite() && ny.is_finite());
+        (nx, ny, teleported)
     }
 
     fn cats_eat_rats(&mut self) {
@@ -1299,17 +1145,6 @@ fn free_along(actor: Collider, dir: Dir, blocker: Collider) -> f32 {
         return f32::INFINITY;
     };
     match blocker {
-        Collider::Rect {
-            left,
-            top,
-            right,
-            bottom,
-        } => free_capsule_rect(cx, cy, r, half, dir, left, top, right, bottom),
-        Collider::Circle {
-            cx: ox,
-            cy: oy,
-            r: or,
-        } => free_capsule_circle(cx, cy, r, half, dir, ox, oy, or),
         Collider::Capsule {
             cx: ox,
             cy: oy,
@@ -1418,69 +1253,6 @@ fn free_capsule_rect(
                 0.0
             } else {
                 f32::INFINITY
-            }
-        }
-    }
-}
-
-/// Sweep a horizontal capsule against a circle.
-#[allow(clippy::too_many_arguments)]
-fn free_capsule_circle(
-    cx: f32,
-    cy: f32,
-    r: f32,
-    half: f32,
-    dir: Dir,
-    ox: f32,
-    oy: f32,
-    or: f32,
-) -> f32 {
-    let radius = r + or;
-    let dx = (ox - (cx + half)).max(cx - half - ox).max(0.0);
-    let dy = (oy - cy).abs();
-    match dir {
-        Dir::Right => {
-            if ox <= cx + half {
-                return f32::INFINITY;
-            }
-            let gap = ox - (cx + half);
-            if dy >= radius - COLLISION_EPSILON {
-                f32::INFINITY
-            } else {
-                (gap - (radius * radius - dy * dy).sqrt()).max(0.0)
-            }
-        }
-        Dir::Left => {
-            if ox >= cx - half {
-                return f32::INFINITY;
-            }
-            let gap = (cx - half) - ox;
-            if dy >= radius - COLLISION_EPSILON {
-                f32::INFINITY
-            } else {
-                (gap - (radius * radius - dy * dy).sqrt()).max(0.0)
-            }
-        }
-        Dir::Down => {
-            if oy <= cy {
-                return f32::INFINITY;
-            }
-            let gap = oy - cy;
-            if dx >= radius - COLLISION_EPSILON {
-                f32::INFINITY
-            } else {
-                (gap - (radius * radius - dx * dx).sqrt()).max(0.0)
-            }
-        }
-        Dir::Up => {
-            if oy >= cy {
-                return f32::INFINITY;
-            }
-            let gap = cy - oy;
-            if dx >= radius - COLLISION_EPSILON {
-                f32::INFINITY
-            } else {
-                (gap - (radius * radius - dx * dx).sqrt()).max(0.0)
             }
         }
     }
@@ -1598,7 +1370,16 @@ fn free_along_seam(actor: Collider, dir: Dir, seam: &Seam) -> f32 {
     }
 }
 
-/// If (x, y) is within 1 cell of a hole, return the free landing cell at the other hole.
+/// True when the actor's feet overlap the ground area of a hole.
+fn on_hole(holes: &[Cell], x: f32, y: f32) -> bool {
+    debug_assert!(x.is_finite() && y.is_finite());
+    let actor = Collider::actor(x, y);
+    holes
+        .iter()
+        .any(|hole| actor.overlaps(Collider::hole(hole)))
+}
+
+/// If (x, y) is touching a hole, return the free landing cell at the other hole.
 fn teleport_target(
     holes: &[Cell],
     x: f32,
@@ -1609,11 +1390,9 @@ fn teleport_target(
     if holes.len() != 2 {
         return None;
     }
+    let actor = Collider::actor(x, y);
     for (i, h) in holes.iter().enumerate() {
-        let (hx, hy) = (h[0] as f32, h[1] as f32);
-        let near = ((x - hx).abs() < 1.0 || (x - (hx + 1.0)).abs() < 1.0)
-            && (y - hy).abs() < 1.0;
-        if !near {
+        if !actor.overlaps(Collider::hole(h)) {
             continue;
         }
         let other = holes[1 - i];
@@ -2054,11 +1833,13 @@ mod tests {
         else {
             panic!("tomato should be a rounded rectangle");
         };
-        let square = Collider::Rect {
+        let square = Collider::RoundedRect {
             left,
             top,
             right,
             bottom,
+            corner: 0.0,
+            solid_y: true,
         };
         let (rounded_x, _) =
             move_sprite_with_colliders(1.0, 0.75, Dir::Right, 4.0, &[tomato]);
@@ -2091,6 +1872,16 @@ mod tests {
             }
         }
         assert_eq!(out, Some(Outcome::CatWin));
+    }
+
+    #[test]
+    fn same_step_cat_and_rat_tie_goes_to_the_cat() {
+        // The last rat is on the last tomato while a cat is also there.
+        let mut g = Game::new(&map(&[[1, 1]], &[[1, 1]], &[[1, 1]], &[]), 1);
+        let outcome = g.step(&Input::default());
+        assert_eq!(outcome, Some(Outcome::CatWin));
+        // The rat was killed before it could eat the last tomato.
+        assert_eq!(g.tomatoes.len(), 1);
     }
 
     #[test]
@@ -2290,6 +2081,58 @@ mod tests {
         }
         assert!(teleported);
         assert!(g.rats[0].x >= 10.0);
+        // The teleport must not be interpolated across the two holes.
+        assert_eq!(g.rats[0].prev_x, g.rats[0].x);
+        assert_eq!(g.rats[0].prev_y, g.rats[0].y);
+    }
+
+    #[test]
+    fn step_records_the_previous_position_for_interpolation() {
+        let mut g = Game::new(&map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[]), 1);
+        let (x, y) = (g.rats[0].x, g.rats[0].y);
+        g.step(&rat_holds(Dir::Right));
+        assert_eq!(g.rats[0].prev_x, x);
+        assert_eq!(g.rats[0].prev_y, y);
+        assert!(g.rats[0].x > x);
+        assert_eq!(g.rats[0].y, y);
+    }
+
+    #[test]
+    fn teleport_needs_foot_contact() {
+        let holes = [[2, 2], [10, 5]];
+        // Within one cell of the hole's corner, but the feet are not on it.
+        assert_eq!(teleport_target(&holes, 1.1, 1.1, &[]), None);
+        // Feet on the hole ground area.
+        assert!(teleport_target(&holes, 2.0, 2.0, &[]).is_some());
+    }
+
+    #[test]
+    fn teleport_does_not_bounce_while_standing_on_the_exit() {
+        let m = Map {
+            holes: vec![[2, 2], [10, 5]],
+            ..map(&[[19, 9]], &[[0, 2]], &[[19, 0]], &[])
+        };
+        let mut g = Game::new(&m, 1);
+        for _ in 0..60 {
+            g.step(&rat_holds(Dir::Right));
+            if g.rats[0].x >= 10.0 {
+                break;
+            }
+        }
+        assert!((g.rats[0].y - 5.0).abs() < 1e-6);
+        // Stay on the exit hole for longer than the cooldown, then walk off.
+        for _ in 0..140 {
+            g.step(&Input::default());
+        }
+        for _ in 0..30 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(
+            (g.rats[0].y - 5.0).abs() < 1e-6,
+            "rat bounced back to y={}",
+            g.rats[0].y
+        );
+        assert!(g.rats[0].x > 10.5);
     }
 
     #[test]

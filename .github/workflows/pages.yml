@@ -24,14 +24,25 @@ jobs:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            pkg-config \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev
       - name: Format
-        run: cargo fmt --check
-      - name: Clippy core
-        run: cargo clippy -p cat_vs_rat_core --all-targets -- -D warnings
-      - name: Test core
-        run: cargo test -p cat_vs_rat_core
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
       - name: Install binaryen
-        run: sudo apt-get update && sudo apt-get install -y binaryen
+        run: sudo apt-get install -y binaryen
       - name: Build site
         run: ./build-web.sh
       - uses: actions/upload-pages-artifact@v3
