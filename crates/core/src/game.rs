@@ -404,6 +404,7 @@ impl Collider {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capsule_rect_overlap(
     cx: f32,
     cy: f32,
@@ -457,6 +458,7 @@ fn rounded_inner(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capsule_rounded_rect_overlap(
     cx: f32,
     cy: f32,
@@ -482,6 +484,7 @@ fn capsule_rounded_rect_overlap(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn circle_rounded_rect_overlap(
     cx: f32,
     cy: f32,
@@ -505,6 +508,7 @@ fn circle_rounded_rect_overlap(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rect_rounded_rect_overlap(
     a_left: f32,
     a_top: f32,
@@ -530,6 +534,7 @@ fn rect_rounded_rect_overlap(
     ) < corner + COLLISION_EPSILON
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rounded_rect_overlap(
     a_left: f32,
     a_top: f32,
@@ -558,6 +563,7 @@ fn rounded_rect_overlap(
     ) < a_corner + corner + COLLISION_EPSILON
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rect_rect_distance(
     a_left: f32,
     a_top: f32,
@@ -1174,6 +1180,7 @@ fn axis_move(
 }
 
 /// Try a small sideways nudge so a blocked axis can cut around a corner.
+#[allow(clippy::too_many_arguments)]
 fn corner_cut(
     x: f32,
     y: f32,
@@ -1338,6 +1345,7 @@ fn free_along(actor: Collider, dir: Dir, blocker: Collider) -> f32 {
 }
 
 /// Sweep a horizontal capsule against an axis-aligned rectangle.
+#[allow(clippy::too_many_arguments)]
 fn free_capsule_rect(
     cx: f32,
     cy: f32,
@@ -1416,6 +1424,7 @@ fn free_capsule_rect(
 }
 
 /// Sweep a horizontal capsule against a circle.
+#[allow(clippy::too_many_arguments)]
 fn free_capsule_circle(
     cx: f32,
     cy: f32,
@@ -1478,6 +1487,7 @@ fn free_capsule_circle(
 }
 
 /// Sweep a horizontal capsule against another horizontal capsule.
+#[allow(clippy::too_many_arguments)]
 fn free_capsule_capsule(
     cx: f32,
     cy: f32,
