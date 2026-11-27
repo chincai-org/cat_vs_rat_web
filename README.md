@@ -52,12 +52,21 @@ are stored in the browser's localStorage (a local file on desktop).
 ## Design choices (change in crates/core/src/game.rs)
 
 - Fixed 60 Hz simulation; speeds are per second (cat 3.5, rat 7.0 cells/s).
-- Collision uses a ground footprint at the bottom of each cell, so a sprite
-  can walk behind the top of a box and stops at its base (2.5D). Vertically
-  stacked boxes merge into one footprint, so there are no seams to slip through.
+- Cats and rats use a horizontal capsule on their ground footprint; the sprite
+  is centred on the body, so the tail never adds a collision lobe.
+  Tomatoes use the drawn fruit's width and lower part, ending at the drawn base.
+  They block both axes; each axis resolves separately, so a blocked move still
+  slides along the obstacle instead of sticking. A blocked move may nudge a
+  little sideways to cut around a rounded corner; actor capsules and diagonal
+  seams stay solid.
+  Boxes and spikes use rounded ground footprints at the bottom of each cell, so
+  a sprite can walk behind the top of a box and stops at its base (2.5D).
+  Vertically stacked boxes merge into one footprint, so there are no seams to
+  slip through.
 - Spikes start off and toggle every 1 s (original code; its README says 2 s).
 - Only living rats eat tomatoes; cats only kill living rats; dead rats still block rats.
-- Last direction key pressed wins (falls back to the next held key on release).
+- Held keys combine into a movement vector; diagonals keep single-axis speed.
+  Facing follows the last direction key pressed (falls back on release).
 - If every cat is removed, the round ends as a draw (tomatoes remain).
 
 ## Editor and browser features

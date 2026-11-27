@@ -247,7 +247,7 @@ impl EditorScreen {
                 (KeyCode::T, Tool::Tomato),
                 (KeyCode::S, Tool::Spike),
                 (KeyCode::H, Tool::Hole),
-                (KeyCode::D, Tool::Eraser),
+                (KeyCode::E, Tool::Eraser),
                 (KeyCode::Delete, Tool::Eraser),
                 (KeyCode::Backspace, Tool::Eraser),
             ];
@@ -267,7 +267,7 @@ impl EditorScreen {
             (Tool::Tomato, "Tomato (T)"),
             (Tool::Spike, "Spike (S)"),
             (Tool::Hole, "Hole (H)"),
-            (Tool::Eraser, "Eraser (D)"),
+            (Tool::Eraser, "Eraser (E)"),
         ];
         for (i, (tool, label)) in tools.iter().enumerate() {
             let y = 70.0 + i as f32 * 42.0;

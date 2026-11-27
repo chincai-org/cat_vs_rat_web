@@ -10,26 +10,78 @@ pub const FIXED_DT: f32 = 1.0 / 60.0;
 pub const CAT_SPEED: f32 = 3.5;
 pub const RAT_SPEED: f32 = 7.0;
 
-const EAT_RANGE: f32 = 0.5;
-/// Ground footprint, at the bottom of the cell. Actors and map objects share
-/// it so sprites can walk behind the upper part of a box (2.5D) but still stop
-/// at its base.
+/// Original ground footprint, at the bottom of the cell. Boxes and spikes keep
+/// it as a rounded ground footprint.
 const FOOT_LEFT: f32 = 0.05;
 const FOOT_RIGHT: f32 = 0.95;
 const FOOT_TOP: f32 = 0.60;
 const FOOT_BOTTOM: f32 = 1.0;
+/// Cat and mouse ground footprint. The art is centred on the body, so the tail
+/// never adds a collision lobe of its own.
+const ACTOR_LEFT: f32 = 0.05;
+const ACTOR_RIGHT: f32 = 0.95;
+/// Horizontal capsule with the ground footprint.
+const ACTOR_RADIUS: f32 = (FOOT_BOTTOM - FOOT_TOP) * 0.5;
+const ACTOR_HALF: f32 = (ACTOR_RIGHT - ACTOR_LEFT) * 0.5 - ACTOR_RADIUS;
+const ACTOR_CX: f32 = (ACTOR_LEFT + ACTOR_RIGHT) * 0.5;
+const ACTOR_CY: f32 = (FOOT_TOP + FOOT_BOTTOM) * 0.5;
 /// Boxes block with a slightly narrower footprint than actors so their side
 /// walls feel less grabby.
 const BOX_LEFT: f32 = 0.10;
 const BOX_RIGHT: f32 = 0.90;
-/// Tomato art is narrower than its cell, so its horizontal blocker matches it.
-const TOMATO_LEFT: f32 = 0.30;
-const TOMATO_RIGHT: f32 = 0.70;
+/// Tomato hitbox uses the drawn fruit's width and only its lower part, ending
+/// at the drawn base instead of the cell bottom.
+const TOMATO_LEFT: f32 = 0.296875;
+const TOMATO_RIGHT: f32 = 0.703125;
+const TOMATO_TOP: f32 = FOOT_TOP;
+const TOMATO_BOTTOM: f32 = 0.6875;
+/// Round every obstacle corner so a sprite slides around it instead of
+/// catching on a square corner.
+const CORNER: f32 = 0.08;
+const TOMATO_CORNER: f32 = 0.04;
+/// Spikes sit slightly higher than the shared footprint: their base stops a
+/// little above the cell bottom, and their top reaches a little further up the
+/// art so the hitbox matches the drawn spikes.
+const SPIKE_TOP: f32 = 0.40;
+const SPIKE_BOTTOM: f32 = 0.80;
 const COLLISION_EPSILON: f32 = 1e-4;
+/// A fully blocked move may try a small sideways nudge so it can cut around a
+/// rounded corner. Straight moves never nudge past a flat wall, and the nudge
+/// must recover a useful part of the blocked step.
+const CORNER_NUDGE: f32 = 0.06;
+const CORNER_STEP: f32 = 0.01;
+const CORNER_MIN_GAIN: f32 = 1e-3;
+const CORNER_MIN_RATIO: f32 = 0.1;
 const TELEPORT_COOLDOWN: f32 = 2.0;
 /// The original code toggles every 1 s (its README says 2 s).
 const SPIKE_INTERVAL: f32 = 1.0;
 const ATTRITION_INTERVAL: f32 = 30.0;
+
+/// Ground footprint of one static cell type.
+#[derive(Debug, Clone, Copy)]
+struct Footprint {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    corner: f32,
+}
+
+const BOX_FOOT: Footprint = Footprint {
+    left: BOX_LEFT,
+    right: BOX_RIGHT,
+    top: FOOT_TOP,
+    bottom: FOOT_BOTTOM,
+    corner: CORNER,
+};
+
+const SPIKE_FOOT: Footprint = Footprint {
+    left: FOOT_LEFT,
+    right: FOOT_RIGHT,
+    top: SPIKE_TOP,
+    bottom: SPIKE_BOTTOM,
+    corner: CORNER,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -63,81 +115,536 @@ pub struct Rat {
     last_teleport: f32,
 }
 
-/// Collision tracks floor contact areas, not the full projected sprite artwork.
+/// Collision shapes. Cats and rats are horizontal capsules; tomatoes, boxes,
+/// and spikes are rounded rectangles.
 #[derive(Debug, Clone, Copy)]
-struct Collider {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
+enum Collider {
+    /// Kept for tests and as the square baseline for rounded shapes.
+    #[allow(dead_code)]
+    Rect {
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    },
+    /// Axis-aligned rectangle with rounded corners. `corner` is the corner
+    /// radius; the flat sides still slide. `solid_y` blocks vertical movement.
+    RoundedRect {
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        corner: f32,
+        solid_y: bool,
+    },
+    /// Kept for collision helpers and future round shapes; tomatoes now use a
+    /// rounded rectangle.
+    #[allow(dead_code)]
+    Circle { cx: f32, cy: f32, r: f32 },
+    /// Horizontal capsule: a segment from `cx - half` to `cx + half` swept by
+    /// radius `r`.
+    Capsule { cx: f32, cy: f32, r: f32, half: f32 },
 }
 
 impl Collider {
     fn actor(x: f32, y: f32) -> Self {
-        Self {
-            left: x + FOOT_LEFT,
-            top: y + FOOT_TOP,
-            right: x + FOOT_RIGHT,
-            bottom: y + FOOT_BOTTOM,
+        Self::Capsule {
+            cx: x + ACTOR_CX,
+            cy: y + ACTOR_CY,
+            r: ACTOR_RADIUS,
+            half: ACTOR_HALF,
         }
     }
 
     fn object(x: f32, y: f32) -> Self {
-        Self::actor(x, y)
+        Self::RoundedRect {
+            left: x + FOOT_LEFT,
+            top: y + FOOT_TOP,
+            right: x + FOOT_RIGHT,
+            bottom: y + FOOT_BOTTOM,
+            corner: CORNER,
+            solid_y: true,
+        }
     }
 
-    /// One column of vertically touching boxes. The footprint covers the
-    /// whole run so sprites cannot slip through the seam between stacked
-    /// boxes, while the top of the run keeps the usual walk-behind area.
-    fn box_run(x: i32, top: i32, bottom: i32) -> Self {
-        debug_assert!(top <= bottom, "a box run ends at or below its start");
-        Self {
-            left: x as f32 + BOX_LEFT,
-            top: top as f32 + FOOT_TOP,
-            right: x as f32 + BOX_RIGHT,
-            bottom: bottom as f32 + FOOT_BOTTOM,
+    /// Tomatoes use the drawn fruit's width and lower part. They block both
+    /// axes, but a corner nudge lets a sprite slide off them instead of
+    /// catching.
+    fn tomato(cell: &Cell) -> Self {
+        Self::RoundedRect {
+            left: cell[0] as f32 + TOMATO_LEFT,
+            top: cell[1] as f32 + TOMATO_TOP,
+            right: cell[0] as f32 + TOMATO_RIGHT,
+            bottom: cell[1] as f32 + TOMATO_BOTTOM,
+            corner: TOMATO_CORNER,
+            solid_y: true,
         }
     }
 
     fn overlaps(self, other: Self) -> bool {
-        self.left < other.right + COLLISION_EPSILON
-            && self.right > other.left - COLLISION_EPSILON
-            && self.top < other.bottom + COLLISION_EPSILON
-            && self.bottom > other.top - COLLISION_EPSILON
+        match (self, other) {
+            (
+                Self::Rect {
+                    left: a_left,
+                    top: a_top,
+                    right: a_right,
+                    bottom: a_bottom,
+                },
+                Self::Rect {
+                    left: b_left,
+                    top: b_top,
+                    right: b_right,
+                    bottom: b_bottom,
+                },
+            ) => {
+                a_left < b_right + COLLISION_EPSILON
+                    && a_right > b_left - COLLISION_EPSILON
+                    && a_top < b_bottom + COLLISION_EPSILON
+                    && a_bottom > b_top - COLLISION_EPSILON
+            }
+            (
+                Self::Circle {
+                    cx: a_cx,
+                    cy: a_cy,
+                    r: a_r,
+                },
+                Self::Circle {
+                    cx: b_cx,
+                    cy: b_cy,
+                    r: b_r,
+                },
+            ) => {
+                let dx = a_cx - b_cx;
+                let dy = a_cy - b_cy;
+                let radius = a_r + b_r;
+                dx * dx + dy * dy < radius * radius + COLLISION_EPSILON
+            }
+            (
+                Self::Capsule { cx, cy, r, half },
+                Self::Capsule {
+                    cx: ox,
+                    cy: oy,
+                    r: or,
+                    half: ohalf,
+                },
+            ) => {
+                let dx = (cx - ox).abs() - (half + ohalf);
+                let dy = cy - oy;
+                let radius = r + or;
+                let dx = dx.max(0.0);
+                dx * dx + dy * dy < radius * radius + COLLISION_EPSILON
+            }
+            (
+                Self::Capsule { cx, cy, r, half },
+                Self::Circle {
+                    cx: ox,
+                    cy: oy,
+                    r: or,
+                },
+            ) => {
+                let dx = (cx - ox).abs() - half;
+                let dy = cy - oy;
+                let radius = r + or;
+                let dx = dx.max(0.0);
+                dx * dx + dy * dy < radius * radius + COLLISION_EPSILON
+            }
+            (
+                Self::Circle { cx, cy, r },
+                Self::Capsule {
+                    cx: ox,
+                    cy: oy,
+                    r: or,
+                    half,
+                },
+            ) => {
+                let dx = (cx - ox).abs() - half;
+                let dy = cy - oy;
+                let radius = r + or;
+                let dx = dx.max(0.0);
+                dx * dx + dy * dy < radius * radius + COLLISION_EPSILON
+            }
+            (
+                Self::Capsule { cx, cy, r, half },
+                Self::Rect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+            ) => {
+                capsule_rect_overlap(cx, cy, r, half, left, top, right, bottom)
+            }
+            (rect @ Self::Rect { .. }, capsule @ Self::Capsule { .. }) => {
+                capsule.overlaps(rect)
+            }
+            (
+                Self::Circle { cx, cy, r },
+                Self::Rect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+            ) => circle_rect_overlap(cx, cy, r, left, top, right, bottom),
+            (rect @ Self::Rect { .. }, circle @ Self::Circle { .. }) => {
+                circle.overlaps(rect)
+            }
+            (
+                Self::Capsule { cx, cy, r, half },
+                Self::RoundedRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    corner,
+                    solid_y: _,
+                },
+            ) => capsule_rounded_rect_overlap(
+                cx, cy, r, half, left, top, right, bottom, corner,
+            ),
+            (
+                Self::RoundedRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    corner,
+                    solid_y: _,
+                },
+                Self::Capsule { cx, cy, r, half },
+            ) => capsule_rounded_rect_overlap(
+                cx, cy, r, half, left, top, right, bottom, corner,
+            ),
+            (
+                Self::Circle { cx, cy, r },
+                Self::RoundedRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    corner,
+                    solid_y: _,
+                },
+            ) => circle_rounded_rect_overlap(
+                cx, cy, r, left, top, right, bottom, corner,
+            ),
+            (
+                Self::RoundedRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    corner,
+                    solid_y: _,
+                },
+                Self::Circle { cx, cy, r },
+            ) => circle_rounded_rect_overlap(
+                cx, cy, r, left, top, right, bottom, corner,
+            ),
+            (
+                Self::Rect {
+                    left: a_left,
+                    top: a_top,
+                    right: a_right,
+                    bottom: a_bottom,
+                },
+                Self::RoundedRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    corner,
+                    solid_y: _,
+                },
+            ) => rect_rounded_rect_overlap(
+                a_left, a_top, a_right, a_bottom, left, top, right, bottom,
+                corner,
+            ),
+            (
+                Self::RoundedRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    corner,
+                    solid_y: _,
+                },
+                Self::Rect {
+                    left: a_left,
+                    top: a_top,
+                    right: a_right,
+                    bottom: a_bottom,
+                },
+            ) => rect_rounded_rect_overlap(
+                a_left, a_top, a_right, a_bottom, left, top, right, bottom,
+                corner,
+            ),
+            (
+                Self::RoundedRect {
+                    left: a_left,
+                    top: a_top,
+                    right: a_right,
+                    bottom: a_bottom,
+                    corner: a_corner,
+                    solid_y: _,
+                },
+                Self::RoundedRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    corner,
+                    solid_y: _,
+                },
+            ) => rounded_rect_overlap(
+                a_left, a_top, a_right, a_bottom, a_corner, left, top, right,
+                bottom, corner,
+            ),
+        }
     }
 }
 
-fn map_cell_collider(cell: &Cell) -> Collider {
-    Collider::object(cell[0] as f32, cell[1] as f32)
+fn capsule_rect_overlap(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    half: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> bool {
+    let dx = (left - (cx + half)).max(cx - half - right).max(0.0);
+    let dy = (top - cy).max(cy - bottom).max(0.0);
+    dx * dx + dy * dy < r * r + COLLISION_EPSILON
 }
 
-/// Cats stop at the tomato's drawn width, not the whole cell.
-fn tomato_collider(cell: &Cell) -> Collider {
-    let [x, y] = *cell;
-    Collider {
-        left: x as f32 + TOMATO_LEFT,
-        top: y as f32 + FOOT_TOP,
-        right: x as f32 + TOMATO_RIGHT,
-        bottom: y as f32 + FOOT_BOTTOM,
-    }
+fn circle_rect_overlap(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> bool {
+    let nearest_x = cx.clamp(left, right);
+    let nearest_y = cy.clamp(top, bottom);
+    let dx = cx - nearest_x;
+    let dy = cy - nearest_y;
+    dx * dx + dy * dy < r * r + COLLISION_EPSILON
 }
 
-/// Merge every contiguous vertical run of boxes into one footprint.
+/// A rounded rectangle is its inset rectangle swept by a disk of `corner`
+/// radius, so every test reduces to a distance test against that inset.
+fn rounded_inner(
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    corner: f32,
+) -> (f32, f32, f32, f32, f32) {
+    let corner = corner
+        .max(0.0)
+        .min((right - left) * 0.5)
+        .min((bottom - top) * 0.5);
+    (
+        left + corner,
+        top + corner,
+        right - corner,
+        bottom - corner,
+        corner,
+    )
+}
+
+fn capsule_rounded_rect_overlap(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    half: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    corner: f32,
+) -> bool {
+    let (inner_left, inner_top, inner_right, inner_bottom, corner) =
+        rounded_inner(left, top, right, bottom, corner);
+    capsule_rect_overlap(
+        cx,
+        cy,
+        r + corner,
+        half,
+        inner_left,
+        inner_top,
+        inner_right,
+        inner_bottom,
+    )
+}
+
+fn circle_rounded_rect_overlap(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    corner: f32,
+) -> bool {
+    let (inner_left, inner_top, inner_right, inner_bottom, corner) =
+        rounded_inner(left, top, right, bottom, corner);
+    circle_rect_overlap(
+        cx,
+        cy,
+        r + corner,
+        inner_left,
+        inner_top,
+        inner_right,
+        inner_bottom,
+    )
+}
+
+fn rect_rounded_rect_overlap(
+    a_left: f32,
+    a_top: f32,
+    a_right: f32,
+    a_bottom: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    corner: f32,
+) -> bool {
+    let (inner_left, inner_top, inner_right, inner_bottom, corner) =
+        rounded_inner(left, top, right, bottom, corner);
+    rect_rect_distance(
+        a_left,
+        a_top,
+        a_right,
+        a_bottom,
+        inner_left,
+        inner_top,
+        inner_right,
+        inner_bottom,
+    ) < corner + COLLISION_EPSILON
+}
+
+fn rounded_rect_overlap(
+    a_left: f32,
+    a_top: f32,
+    a_right: f32,
+    a_bottom: f32,
+    a_corner: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    corner: f32,
+) -> bool {
+    let (a_inner_left, a_inner_top, a_inner_right, a_inner_bottom, a_corner) =
+        rounded_inner(a_left, a_top, a_right, a_bottom, a_corner);
+    let (inner_left, inner_top, inner_right, inner_bottom, corner) =
+        rounded_inner(left, top, right, bottom, corner);
+    rect_rect_distance(
+        a_inner_left,
+        a_inner_top,
+        a_inner_right,
+        a_inner_bottom,
+        inner_left,
+        inner_top,
+        inner_right,
+        inner_bottom,
+    ) < a_corner + corner + COLLISION_EPSILON
+}
+
+fn rect_rect_distance(
+    a_left: f32,
+    a_top: f32,
+    a_right: f32,
+    a_bottom: f32,
+    b_left: f32,
+    b_top: f32,
+    b_right: f32,
+    b_bottom: f32,
+) -> f32 {
+    let dx = (b_left - a_right).max(a_left - b_right).max(0.0);
+    let dy = (b_top - a_bottom).max(a_top - b_bottom).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Merge every contiguous vertical run of cells into one footprint.
 ///
-/// Two boxes stacked in the same column would otherwise leave a 0.6-cell
-/// seam between their foot footprints, which a sprite could walk through.
-fn box_run_colliders(boxes: &[Cell]) -> Vec<Collider> {
-    boxes
+/// Two cells stacked in the same column would otherwise leave a seam between
+/// their foot footprints, which a sprite could walk through. Boxes and raised
+/// spikes share this rule.
+fn run_colliders(cells: &[Cell], foot: Footprint) -> Vec<Collider> {
+    cells
         .iter()
-        .filter(|cell| !boxes.contains(&[cell[0], cell[1] - 1]))
+        .filter(|cell| !cells.contains(&[cell[0], cell[1] - 1]))
         .map(|cell| {
             let [x, mut bottom] = *cell;
-            while boxes.contains(&[x, bottom + 1]) {
+            while cells.contains(&[x, bottom + 1]) {
                 bottom += 1;
             }
-            Collider::box_run(x, cell[1], bottom)
+            Collider::RoundedRect {
+                left: x as f32 + foot.left,
+                top: cell[1] as f32 + foot.top,
+                right: x as f32 + foot.right,
+                bottom: bottom as f32 + foot.bottom,
+                corner: foot.corner,
+                solid_y: true,
+            }
         })
         .collect()
+}
+
+fn box_run_colliders(boxes: &[Cell]) -> Vec<Collider> {
+    run_colliders(boxes, BOX_FOOT)
+}
+
+/// The gap between two cells that touch only at a corner.
+///
+/// The gap is too narrow for a sprite to fit through, but its feet can slide
+/// along the diagonal. The seam is handled separately from cell colliders so
+/// it only stops movement *into* the gap: it uses the edge of the cell being
+/// approached, never widening either cell's side hitbox.
+#[derive(Debug, Clone, Copy)]
+struct Seam {
+    /// Right edge of the left cell: the wall for a sprite moving left.
+    left: f32,
+    /// Left edge of the right cell: the wall for a sprite moving right.
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+fn seams(cells: &[Cell], foot: Footprint) -> Vec<Seam> {
+    let mut seams = Vec::new();
+    for &cell in cells {
+        for (dx, dy) in [(1, 1), (1, -1)] {
+            let other = [cell[0] + dx, cell[1] + dy];
+            if !cells.contains(&other) {
+                continue;
+            }
+            let (upper, lower) = if cell[1] < other[1] {
+                (cell, other)
+            } else {
+                (other, cell)
+            };
+            seams.push(Seam {
+                left: cell[0] as f32 + foot.right,
+                right: other[0] as f32 + foot.left,
+                top: upper[1] as f32 + foot.bottom,
+                bottom: lower[1] as f32 + foot.top,
+            });
+        }
+    }
+    seams
+}
+
+fn box_seams(boxes: &[Cell]) -> Vec<Seam> {
+    seams(boxes, BOX_FOOT)
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +655,10 @@ pub struct Game {
     pub boxes: Vec<Cell>,
     /// Precomputed because boxes never move during a round.
     box_colliders: Vec<Collider>,
+    box_seams: Vec<Seam>,
+    /// Precomputed because spikes never move; only their active state toggles.
+    spike_colliders: Vec<Collider>,
+    spike_seams: Vec<Seam>,
     pub holes: Vec<Cell>,
     pub spikes: Vec<Cell>,
     /// All spikes toggle together.
@@ -162,6 +673,7 @@ pub struct Game {
     /// Reused each step so movement does not allocate.
     order_buf: Vec<Mover>,
     blocker_buf: Vec<Collider>,
+    seam_buf: Vec<Seam>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,6 +698,9 @@ impl Game {
             })
             .collect();
         let box_colliders = box_run_colliders(&map.boxes);
+        let box_seams = box_seams(&map.boxes);
+        let spike_colliders = run_colliders(&map.spikes, SPIKE_FOOT);
+        let spike_seams = seams(&map.spikes, SPIKE_FOOT);
         Game {
             cats: map
                 .cats
@@ -200,6 +715,9 @@ impl Game {
             tomatoes: map.tomatoes.clone(),
             boxes: map.boxes.clone(),
             box_colliders,
+            box_seams,
+            spike_colliders,
+            spike_seams,
             holes: if map.holes.len() == 2 {
                 map.holes.clone()
             } else {
@@ -216,6 +734,7 @@ impl Game {
             rng,
             order_buf: Vec::new(),
             blocker_buf: Vec::new(),
+            seam_buf: Vec::new(),
         }
     }
 
@@ -292,7 +811,15 @@ impl Game {
         out.clear();
         out.extend(self.box_colliders.iter().copied());
         if self.spikes_active {
-            out.extend(self.spikes.iter().map(map_cell_collider));
+            out.extend(self.spike_colliders.iter().copied());
+        }
+    }
+
+    fn fill_static_seams(&self, out: &mut Vec<Seam>) {
+        out.clear();
+        out.extend(self.box_seams.iter().copied());
+        if self.spikes_active {
+            out.extend(self.spike_seams.iter().copied());
         }
     }
 
@@ -306,7 +833,7 @@ impl Game {
                 .filter(|(index, _)| *index != skip)
                 .map(|(_, cat)| Collider::actor(cat.x, cat.y)),
         );
-        out.extend(self.tomatoes.iter().map(tomato_collider));
+        out.extend(self.tomatoes.iter().map(Collider::tomato));
     }
 
     /// Boxes, other rats (dead ones included), active spikes.
@@ -321,6 +848,42 @@ impl Game {
         );
     }
 
+    /// True when a sprite's ground contact is on a raised spike base. Such a
+    /// sprite cannot walk off until the spikes retract.
+    fn on_raised_spike(&self, x: f32, y: f32) -> bool {
+        if !self.spikes_active {
+            return false;
+        }
+        let Collider::Capsule { cx, cy, r, half } = Collider::actor(x, y)
+        else {
+            return false;
+        };
+        let feet_overlap = |top: f32, bottom: f32| {
+            cy - r < bottom - COLLISION_EPSILON
+                && cy + r > top + COLLISION_EPSILON
+        };
+        // The capsule spans its whole footprint, including the rounded ends.
+        let x_overlap = |left: f32, right: f32| {
+            cx - half - r <= right && cx + half + r >= left
+        };
+        self.spike_colliders.iter().any(|c| {
+            let Collider::RoundedRect {
+                left,
+                top,
+                right,
+                bottom,
+                ..
+            } = *c
+            else {
+                return false;
+            };
+            x_overlap(left, right) && feet_overlap(top, bottom)
+        }) || self.spike_seams.iter().any(|s| {
+            x_overlap(s.left.min(s.right), s.left.max(s.right))
+                && feet_overlap(s.top, s.bottom)
+        })
+    }
+
     fn move_sprites(&mut self) {
         let mut order = std::mem::take(&mut self.order_buf);
         order.clear();
@@ -333,18 +896,26 @@ impl Game {
         self.rng.shuffle(&mut order);
 
         let mut blockers = std::mem::take(&mut self.blocker_buf);
+        let mut seams = std::mem::take(&mut self.seam_buf);
+        self.fill_static_seams(&mut seams);
         for m in order.drain(..) {
             let now = self.time;
             match m {
                 Mover::Cat(i) => {
-                    self.fill_cat_blockers(i, &mut blockers);
                     let (x, y) = (self.cats[i].x, self.cats[i].y);
-                    let (mut nx, mut ny) = move_sprite_with_colliders(
+                    if self.on_raised_spike(x, y) {
+                        continue;
+                    }
+                    self.fill_cat_blockers(i, &mut blockers);
+                    let (vx, vy) = self.cat_ctl.movement();
+                    let step = CAT_SPEED * FIXED_DT;
+                    let (mut nx, mut ny) = move_sprite_with_vector(
                         x,
                         y,
-                        self.cat_ctl.facing(),
-                        CAT_SPEED * FIXED_DT,
+                        vx * step,
+                        vy * step,
                         &blockers,
+                        &seams,
                     );
                     let mut teleported = false;
                     if now - self.cats[i].last_teleport > TELEPORT_COOLDOWN {
@@ -367,14 +938,20 @@ impl Game {
                     if !self.rats[i].alive {
                         continue;
                     }
-                    self.fill_rat_blockers(i, &mut blockers);
                     let (x, y) = (self.rats[i].x, self.rats[i].y);
-                    let (mut nx, mut ny) = move_sprite_with_colliders(
+                    if self.on_raised_spike(x, y) {
+                        continue;
+                    }
+                    self.fill_rat_blockers(i, &mut blockers);
+                    let (vx, vy) = self.rat_ctl.movement();
+                    let step = RAT_SPEED * FIXED_DT;
+                    let (mut nx, mut ny) = move_sprite_with_vector(
                         x,
                         y,
-                        self.rat_ctl.facing(),
-                        RAT_SPEED * FIXED_DT,
+                        vx * step,
+                        vy * step,
                         &blockers,
+                        &seams,
                     );
                     let mut teleported = false;
                     if now - self.rats[i].last_teleport > TELEPORT_COOLDOWN {
@@ -397,15 +974,16 @@ impl Game {
         }
         self.order_buf = order;
         self.blocker_buf = blockers;
+        self.seam_buf = seams;
     }
 
     fn cats_eat_rats(&mut self) {
         let now = self.time;
         for cat in &self.cats {
+            let cat_hitbox = Collider::actor(cat.x, cat.y);
             for rat in self.rats.iter_mut() {
                 if rat.alive
-                    && (cat.x - rat.x).abs() < EAT_RANGE
-                    && (cat.y - rat.y).abs() < EAT_RANGE
+                    && cat_hitbox.overlaps(Collider::actor(rat.x, rat.y))
                 {
                     rat.alive = false;
                     rat.died_at = now;
@@ -417,11 +995,9 @@ impl Game {
     fn rats_eat_tomatoes(&mut self) {
         let rats = &self.rats;
         self.tomatoes.retain(|t| {
-            let (tx, ty) = (t[0] as f32, t[1] as f32);
+            let tomato_hitbox = Collider::tomato(t);
             !rats.iter().any(|r| {
-                r.alive
-                    && (r.x - tx).abs() < EAT_RANGE
-                    && (r.y - ty).abs() < EAT_RANGE
+                r.alive && Collider::actor(r.x, r.y).overlaps(tomato_hitbox)
             })
         });
     }
@@ -449,60 +1025,567 @@ fn move_sprite_with_colliders(
     step: f32,
     blockers: &[Collider],
 ) -> (f32, f32) {
+    move_sprite_with_seams(x, y, dir, step, blockers, &[])
+}
+
+fn move_sprite_with_seams(
+    x: f32,
+    y: f32,
+    dir: Dir,
+    step: f32,
+    blockers: &[Collider],
+    seams: &[Seam],
+) -> (f32, f32) {
     debug_assert!(step >= 0.0, "step must not be negative");
     debug_assert!(x >= -1e-3 && x <= (COLS - 1) as f32 + 1e-3);
     debug_assert!(y >= -1e-3 && y <= (ROWS - 1) as f32 + 1e-3);
+    let free = free_distance(x, y, dir, blockers, seams);
+    let distance = step.min(free).max(0.0);
+    let (dx, dy) = dir.delta();
+    debug_assert!(distance >= 0.0 && distance <= step);
+    (x + dx * distance, y + dy * distance)
+}
+
+/// Move one frame as a 2D vector. Each axis is resolved separately, so a
+/// blocked component still lets the other slide along the obstacle. If an axis
+/// is blocked at a rounded corner, a small sideways nudge lets it slide past
+/// instead of sticking.
+fn move_sprite_with_vector(
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    blockers: &[Collider],
+    seams: &[Seam],
+) -> (f32, f32) {
+    debug_assert!(x >= -1e-3 && x <= (COLS - 1) as f32 + 1e-3);
+    debug_assert!(y >= -1e-3 && y <= (ROWS - 1) as f32 + 1e-3);
+    debug_assert!(dx.is_finite() && dy.is_finite());
+    let moved = axis_move(x, y, dx, dy, blockers, seams);
+    let blocked_x =
+        dx != 0.0 && (moved.0 - x).abs() + COLLISION_EPSILON < dx.abs();
+    let blocked_y =
+        dy != 0.0 && (moved.1 - y).abs() + COLLISION_EPSILON < dy.abs();
+
+    match (blocked_x, blocked_y) {
+        (false, false) => moved,
+        // One axis is free: cut around the corner of the blocked axis, keeping
+        // the progress the free axis already made.
+        (true, false) => {
+            let remaining = dx.abs() - (moved.0 - x).abs();
+            let dir = if dx < 0.0 { Dir::Left } else { Dir::Right };
+            cut_blocked_axis(
+                moved.0,
+                moved.1,
+                dir,
+                remaining,
+                blockers,
+                seams,
+                [Some(Dir::Up), Some(Dir::Down)],
+            )
+            .unwrap_or(moved)
+        }
+        (false, true) => {
+            let remaining = dy.abs() - (moved.1 - y).abs();
+            let dir = if dy < 0.0 { Dir::Up } else { Dir::Down };
+            cut_blocked_axis(
+                moved.0,
+                moved.1,
+                dir,
+                remaining,
+                blockers,
+                seams,
+                [Some(Dir::Left), Some(Dir::Right)],
+            )
+            .unwrap_or(moved)
+        }
+        // Both axes are blocked: try each one and keep the bigger gain.
+        (true, true) => {
+            let mut best = moved;
+            let mut best_score = (moved.0 - x) * dx + (moved.1 - y) * dy;
+            for (dir, step, slides) in [
+                (
+                    if dy < 0.0 { Dir::Up } else { Dir::Down },
+                    dy.abs(),
+                    [Some(Dir::Left), Some(Dir::Right)],
+                ),
+                (
+                    if dx < 0.0 { Dir::Left } else { Dir::Right },
+                    dx.abs(),
+                    [Some(Dir::Up), Some(Dir::Down)],
+                ),
+            ] {
+                let free = free_distance(x, y, dir, blockers, seams);
+                if let Some((nx, ny)) =
+                    corner_cut(x, y, dir, step, blockers, seams, free, slides)
+                {
+                    let score = (nx - x) * dx + (ny - y) * dy;
+                    if score > best_score + CORNER_MIN_GAIN {
+                        best = (nx, ny);
+                        best_score = score;
+                    }
+                }
+            }
+            best
+        }
+    }
+}
+
+/// Try to cut a single blocked axis around a corner.
+fn cut_blocked_axis(
+    x: f32,
+    y: f32,
+    dir: Dir,
+    step: f32,
+    blockers: &[Collider],
+    seams: &[Seam],
+    slides: [Option<Dir>; 2],
+) -> Option<(f32, f32)> {
+    if step <= COLLISION_EPSILON {
+        return None;
+    }
+    let free = free_distance(x, y, dir, blockers, seams);
+    corner_cut(x, y, dir, step, blockers, seams, free, slides)
+}
+
+fn axis_move(
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    blockers: &[Collider],
+    seams: &[Seam],
+) -> (f32, f32) {
+    let mut x = x;
+    let mut y = y;
+    if dx != 0.0 {
+        let dir = if dx < 0.0 { Dir::Left } else { Dir::Right };
+        let (moved, _) =
+            move_sprite_with_seams(x, y, dir, dx.abs(), blockers, seams);
+        x = moved;
+    }
+    if dy != 0.0 {
+        let dir = if dy < 0.0 { Dir::Up } else { Dir::Down };
+        let (_, moved) =
+            move_sprite_with_seams(x, y, dir, dy.abs(), blockers, seams);
+        y = moved;
+    }
+    (x, y)
+}
+
+/// Try a small sideways nudge so a blocked axis can cut around a corner.
+fn corner_cut(
+    x: f32,
+    y: f32,
+    dir: Dir,
+    step: f32,
+    blockers: &[Collider],
+    seams: &[Seam],
+    free: f32,
+    slides: [Option<Dir>; 2],
+) -> Option<(f32, f32)> {
+    // Only rounded obstacles have a corner to cut around. Actor capsules and
+    // diagonal seams stay solid, so a blocked move cannot slip past them.
+    if !blocked_by_rounded_rect(x, y, dir, blockers, seams) {
+        return None;
+    }
+    let (dx, dy) = dir.delta();
+    let mut best = None;
+    for slide in slides.into_iter().flatten() {
+        let (sx, sy) = slide.delta();
+        let mut offset = CORNER_STEP;
+        while offset <= CORNER_NUDGE + COLLISION_EPSILON {
+            let start_x = x + sx * offset;
+            let start_y = y + sy * offset;
+            if start_x < -1e-3
+                || start_x > (COLS - 1) as f32 + 1e-3
+                || start_y < -1e-3
+                || start_y > (ROWS - 1) as f32 + 1e-3
+            {
+                offset += CORNER_STEP;
+                continue;
+            }
+
+            let shifted_free =
+                free_distance(start_x, start_y, dir, blockers, seams);
+            let progress = step.min(shifted_free).max(0.0);
+            if progress > free + CORNER_MIN_GAIN
+                && progress >= step * CORNER_MIN_RATIO
+            {
+                let nx = start_x + dx * progress;
+                let ny = start_y + dy * progress;
+                if progress >= step - COLLISION_EPSILON {
+                    return Some((nx, ny));
+                }
+                if best.is_none() {
+                    best = Some((nx, ny));
+                }
+            }
+            offset += CORNER_STEP;
+        }
+    }
+    best
+}
+
+/// Whether the nearest obstacle along `dir` is a rounded rectangle. Seams and
+/// actor capsules do not allow a corner cut.
+fn blocked_by_rounded_rect(
+    x: f32,
+    y: f32,
+    dir: Dir,
+    blockers: &[Collider],
+    seams: &[Seam],
+) -> bool {
     let actor = Collider::actor(x, y);
-    let mut free_up = y;
-    let mut free_down = (ROWS - 1) as f32 - y;
-    let mut free_left = x;
-    let mut free_right = (COLS - 1) as f32 - x;
+    let mut best = f32::INFINITY;
+    let mut rounded = false;
+    for &blocker in blockers {
+        let distance = free_along(actor, dir, blocker);
+        if distance < best {
+            best = distance;
+            rounded = matches!(blocker, Collider::RoundedRect { .. });
+        }
+    }
+    for seam in seams {
+        let distance = free_along_seam(actor, dir, seam);
+        if distance < best {
+            best = distance;
+            rounded = false;
+        }
+    }
+    rounded
+}
+
+fn free_distance(
+    x: f32,
+    y: f32,
+    dir: Dir,
+    blockers: &[Collider],
+    seams: &[Seam],
+) -> f32 {
+    let actor = Collider::actor(x, y);
+    let mut free = match dir {
+        Dir::Up => y,
+        Dir::Down => (ROWS - 1) as f32 - y,
+        Dir::Left => x,
+        Dir::Right => (COLS - 1) as f32 - x,
+    };
 
     for blocker in blockers {
-        // Strict overlap, not contact: a sprite resting on a box top has its
-        // feet exactly on the box footprint's top edge and must still walk
-        // sideways over it. The epsilon form counted that contact as a wall.
-        let overlaps_y =
-            actor.top < blocker.bottom && actor.bottom > blocker.top;
-        if overlaps_y {
-            if blocker.right <= actor.left + COLLISION_EPSILON {
-                free_left = free_left.min(
-                    (actor.left - blocker.right - COLLISION_EPSILON).max(0.0),
-                );
-            } else if blocker.left >= actor.right - COLLISION_EPSILON {
-                free_right = free_right.min(
-                    (blocker.left - actor.right - COLLISION_EPSILON).max(0.0),
-                );
+        free = free.min(free_along(actor, dir, *blocker));
+    }
+
+    // A diagonal gap only needs sealing against horizontal movement: the
+    // boxes themselves already block a sprite from fitting between them
+    // vertically. Block at the edge of the box the sprite is moving toward.
+    for seam in seams {
+        free = free.min(free_along_seam(actor, dir, seam));
+    }
+
+    free
+}
+
+/// Distance an actor can travel along `dir` before touching `blocker`.
+/// `f32::INFINITY` means the blocker is not in the way.
+fn free_along(actor: Collider, dir: Dir, blocker: Collider) -> f32 {
+    let Collider::Capsule { cx, cy, r, half } = actor else {
+        return f32::INFINITY;
+    };
+    match blocker {
+        Collider::Rect {
+            left,
+            top,
+            right,
+            bottom,
+        } => free_capsule_rect(cx, cy, r, half, dir, left, top, right, bottom),
+        Collider::Circle {
+            cx: ox,
+            cy: oy,
+            r: or,
+        } => free_capsule_circle(cx, cy, r, half, dir, ox, oy, or),
+        Collider::Capsule {
+            cx: ox,
+            cy: oy,
+            r: or,
+            half: ohalf,
+        } => free_capsule_capsule(cx, cy, r, half, dir, ox, oy, or, ohalf),
+        Collider::RoundedRect {
+            left,
+            top,
+            right,
+            bottom,
+            corner,
+            solid_y,
+        } => {
+            if !solid_y && matches!(dir, Dir::Up | Dir::Down) {
+                return f32::INFINITY;
+            }
+            let (inner_left, inner_top, inner_right, inner_bottom, corner) =
+                rounded_inner(left, top, right, bottom, corner);
+            free_capsule_rect(
+                cx,
+                cy,
+                r + corner,
+                half,
+                dir,
+                inner_left,
+                inner_top,
+                inner_right,
+                inner_bottom,
+            )
+        }
+    }
+}
+
+/// Sweep a horizontal capsule against an axis-aligned rectangle.
+fn free_capsule_rect(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    half: f32,
+    dir: Dir,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> f32 {
+    let dx = (left - (cx + half)).max(cx - half - right).max(0.0);
+    let dy = (top - cy).max(cy - bottom).max(0.0);
+    match dir {
+        Dir::Right => {
+            let gap = left - (cx + half);
+            if gap > 0.0 {
+                if dy >= r - COLLISION_EPSILON {
+                    return f32::INFINITY;
+                }
+                (gap - (r * r - dy * dy).sqrt()).max(0.0)
+            } else if right > cx + half + COLLISION_EPSILON
+                && dy < r - COLLISION_EPSILON
+            {
+                0.0
+            } else {
+                f32::INFINITY
             }
         }
-
-        // Same rule on the other axis: touching a box side while moving
-        // vertically must not count as standing on top of or under it.
-        let overlaps_x =
-            actor.left < blocker.right && actor.right > blocker.left;
-        if overlaps_x {
-            if blocker.bottom <= actor.top + COLLISION_EPSILON {
-                free_up = free_up.min(
-                    (actor.top - blocker.bottom - COLLISION_EPSILON).max(0.0),
-                );
-            } else if blocker.top >= actor.bottom - COLLISION_EPSILON {
-                free_down = free_down.min(
-                    (blocker.top - actor.bottom - COLLISION_EPSILON).max(0.0),
-                );
+        Dir::Left => {
+            let gap = (cx - half) - right;
+            if gap > 0.0 {
+                if dy >= r - COLLISION_EPSILON {
+                    return f32::INFINITY;
+                }
+                (gap - (r * r - dy * dy).sqrt()).max(0.0)
+            } else if left < cx - half - COLLISION_EPSILON
+                && dy < r - COLLISION_EPSILON
+            {
+                0.0
+            } else {
+                f32::INFINITY
+            }
+        }
+        Dir::Down => {
+            let gap = top - cy;
+            if gap > 0.0 {
+                if dx >= r - COLLISION_EPSILON {
+                    return f32::INFINITY;
+                }
+                (gap - (r * r - dx * dx).sqrt()).max(0.0)
+            } else if bottom > cy + r + COLLISION_EPSILON
+                && dx < r - COLLISION_EPSILON
+            {
+                0.0
+            } else {
+                f32::INFINITY
+            }
+        }
+        Dir::Up => {
+            let gap = cy - bottom;
+            if gap > 0.0 {
+                if dx >= r - COLLISION_EPSILON {
+                    return f32::INFINITY;
+                }
+                (gap - (r * r - dx * dx).sqrt()).max(0.0)
+            } else if top < cy - r - COLLISION_EPSILON
+                && dx < r - COLLISION_EPSILON
+            {
+                0.0
+            } else {
+                f32::INFINITY
             }
         }
     }
+}
 
-    let free = match dir {
-        Dir::Up => free_up,
-        Dir::Down => free_down,
-        Dir::Left => free_left,
-        Dir::Right => free_right,
+/// Sweep a horizontal capsule against a circle.
+fn free_capsule_circle(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    half: f32,
+    dir: Dir,
+    ox: f32,
+    oy: f32,
+    or: f32,
+) -> f32 {
+    let radius = r + or;
+    let dx = (ox - (cx + half)).max(cx - half - ox).max(0.0);
+    let dy = (oy - cy).abs();
+    match dir {
+        Dir::Right => {
+            if ox <= cx + half {
+                return f32::INFINITY;
+            }
+            let gap = ox - (cx + half);
+            if dy >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dy * dy).sqrt()).max(0.0)
+            }
+        }
+        Dir::Left => {
+            if ox >= cx - half {
+                return f32::INFINITY;
+            }
+            let gap = (cx - half) - ox;
+            if dy >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dy * dy).sqrt()).max(0.0)
+            }
+        }
+        Dir::Down => {
+            if oy <= cy {
+                return f32::INFINITY;
+            }
+            let gap = oy - cy;
+            if dx >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dx * dx).sqrt()).max(0.0)
+            }
+        }
+        Dir::Up => {
+            if oy >= cy {
+                return f32::INFINITY;
+            }
+            let gap = cy - oy;
+            if dx >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dx * dx).sqrt()).max(0.0)
+            }
+        }
+    }
+}
+
+/// Sweep a horizontal capsule against another horizontal capsule.
+fn free_capsule_capsule(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    half: f32,
+    dir: Dir,
+    ox: f32,
+    oy: f32,
+    or: f32,
+    ohalf: f32,
+) -> f32 {
+    let radius = r + or;
+    let dx = ((ox - ohalf) - (cx + half))
+        .max((cx - half) - (ox + ohalf))
+        .max(0.0);
+    let dy = (oy - cy).abs();
+    match dir {
+        Dir::Right => {
+            if ox <= cx {
+                return f32::INFINITY;
+            }
+            let gap = (ox - ohalf) - (cx + half);
+            if gap <= 0.0 {
+                if dy < radius - COLLISION_EPSILON {
+                    0.0
+                } else {
+                    f32::INFINITY
+                }
+            } else if dy >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dy * dy).sqrt()).max(0.0)
+            }
+        }
+        Dir::Left => {
+            if ox >= cx {
+                return f32::INFINITY;
+            }
+            let gap = (cx - half) - (ox + ohalf);
+            if gap <= 0.0 {
+                if dy < radius - COLLISION_EPSILON {
+                    0.0
+                } else {
+                    f32::INFINITY
+                }
+            } else if dy >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dy * dy).sqrt()).max(0.0)
+            }
+        }
+        Dir::Down => {
+            if oy <= cy {
+                return f32::INFINITY;
+            }
+            let gap = oy - cy;
+            if dx >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dx * dx).sqrt()).max(0.0)
+            }
+        }
+        Dir::Up => {
+            if oy >= cy {
+                return f32::INFINITY;
+            }
+            let gap = cy - oy;
+            if dx >= radius - COLLISION_EPSILON {
+                f32::INFINITY
+            } else {
+                (gap - (radius * radius - dx * dx).sqrt()).max(0.0)
+            }
+        }
+    }
+}
+
+fn free_along_seam(actor: Collider, dir: Dir, seam: &Seam) -> f32 {
+    let Collider::Capsule { cx, cy, r, half } = actor else {
+        return f32::INFINITY;
     };
-    let (dx, dy) = dir.delta();
-    let distance = step.min(free).max(0.0);
-    debug_assert!(distance >= 0.0 && distance <= step);
-    (x + dx * distance, y + dy * distance)
+    let dy = if cy < seam.top {
+        seam.top - cy
+    } else if cy > seam.bottom {
+        cy - seam.bottom
+    } else {
+        0.0
+    };
+    if dy >= r {
+        return f32::INFINITY;
+    }
+    let reach = (r * r - dy * dy).sqrt();
+    match dir {
+        Dir::Right => {
+            let lead = cx + half;
+            if seam.right < lead + r - COLLISION_EPSILON {
+                return f32::INFINITY;
+            }
+            (seam.right - reach - lead).max(0.0)
+        }
+        Dir::Left => {
+            let lead = cx - half;
+            if seam.left > lead - r + COLLISION_EPSILON {
+                return f32::INFINITY;
+            }
+            (lead - (seam.left + reach)).max(0.0)
+        }
+        _ => f32::INFINITY,
+    }
 }
 
 /// If (x, y) is within 1 cell of a hole, return the free landing cell at the other hole.
@@ -633,6 +1716,22 @@ mod tests {
     }
 
     #[test]
+    fn capsule_corner_does_not_slip_through_a_box() {
+        // The box corner sits in the middle of the capsule, between its two
+        // end circles. A two-circle approximation missed this and let the
+        // sprite slide through.
+        let boxes = box_run_colliders(&[[3, 1]]);
+        let (x, y) =
+            move_sprite_with_colliders(3.4, 0.0, Dir::Down, 3.0, &boxes);
+        assert_eq!(x, 3.4);
+        assert!((y - 0.6).abs() < 2e-4, "down y={y}");
+
+        let (x, y) = move_sprite_with_colliders(3.4, 3.0, Dir::Up, 3.0, &boxes);
+        assert_eq!(x, 3.4);
+        assert!((y - 1.4).abs() < 2e-4, "up y={y}");
+    }
+
+    #[test]
     fn stacked_boxes_can_be_walked_behind_above_their_top() {
         let mut g = Game::new(
             &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 1], [3, 2]]),
@@ -646,11 +1745,103 @@ mod tests {
     }
 
     #[test]
+    fn diagonal_boxes_have_no_corner_gap() {
+        for boxes in [&[[3, 3], [4, 4]][..], &[[4, 3], [3, 4]][..]] {
+            let mut g =
+                Game::new(&map(&[[0, 0]], &[[1, 1]], &[[19, 9]], boxes), 1);
+            // Walk into the seam between the two diagonal boxes.
+            g.rats[0].y = 3.5;
+            for _ in 0..120 {
+                g.step(&rat_holds(Dir::Right));
+            }
+            // Stops flush with the left side of the lower-right box.
+            assert!(
+                (g.rats[0].x - 3.15).abs() < 1e-2,
+                "boxes {boxes:?}: rat at x={}",
+                g.rats[0].x
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_seam_blocks_both_directions() {
+        for boxes in [&[[3, 3], [4, 4]][..], &[[4, 3], [3, 4]][..]] {
+            let mut g =
+                Game::new(&map(&[[0, 0]], &[[1, 1]], &[[19, 9]], boxes), 1);
+            g.rats[0].x = 6.0;
+            g.rats[0].y = 3.5;
+            for _ in 0..120 {
+                g.step(&rat_holds(Dir::Left));
+            }
+            // Stops flush with the right side of the left box.
+            assert!(
+                (g.rats[0].x - 3.85).abs() < 1e-2,
+                "boxes {boxes:?}: rat at x={}",
+                g.rats[0].x
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_seam_stops_where_the_box_does() {
+        let boxes = [[3, 3], [4, 4]];
+        // Through the seam.
+        let (seam_x, _) = move_sprite_with_seams(
+            1.0,
+            3.5,
+            Dir::Right,
+            10.0,
+            &box_run_colliders(&boxes),
+            &box_seams(&boxes),
+        );
+        // Straight into the lower-right box on a row where it blocks normally.
+        let (box_x, _) = move_sprite_with_colliders(
+            1.0,
+            4.2,
+            Dir::Right,
+            10.0,
+            &box_run_colliders(&boxes),
+        );
+        // Rounded box corners let the sprite a little closer than the seam.
+        assert!((seam_x - box_x).abs() < 0.02, "seam={seam_x} box={box_x}");
+    }
+
+    #[test]
+    fn diagonal_seam_does_not_block_walking_past_it() {
+        let mut g = Game::new(
+            &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 3], [4, 4]]),
+            1,
+        );
+        // Feet below both boxes: walk in front of them.
+        g.rats[0].y = 4.5;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x > 5.0, "rat at x={}", g.rats[0].x);
+    }
+
+    #[test]
+    fn diagonal_seam_does_not_block_vertical_movement() {
+        let mut g = Game::new(
+            &map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[[3, 3], [4, 4]]),
+            1,
+        );
+        // Just right of the upper-left box: slide down until the lower-right
+        // box stops the feet, not at the seam.
+        g.rats[0].x = 3.9;
+        g.rats[0].y = 2.0;
+        for _ in 0..120 {
+            g.step(&rat_holds(Dir::Down));
+        }
+        assert!((g.rats[0].y - 3.6).abs() < 1e-2, "rat at y={}", g.rats[0].y);
+    }
+
+    #[test]
     fn feet_touching_a_box_top_do_not_block_sideways_movement() {
         // Boxes side by side, tomato above the right one. A rat on the left
         // box has its feet on the right box's footprint edge. Touching there
         // used to count as a wall, so the rat could not move right.
-        let m = map(&[[0, 0]], &[[9, 2]], &[[10, 3]], &[[9, 4], [10, 4]]);
+        let m = map(&[[0, 0]], &[[9, 2]], &[[18, 9]], &[[9, 4], [10, 4]]);
         let mut g = Game::new(&m, 1);
         for _ in 0..60 {
             g.step(&rat_holds(Dir::Down));
@@ -712,22 +1903,158 @@ mod tests {
     }
 
     #[test]
-    fn tomato_blocks_cats() {
+    fn cat_slides_in_front_of_a_tomato() {
         let mut g =
             Game::new(&map(&[[1, 1]], &[[18, 8]], &[[4, 1], [18, 9]], &[]), 1);
         for _ in 0..180 {
             g.step(&cat_holds(Dir::Right));
         }
-        assert!((g.cats[0].x - 3.35).abs() < 1e-3);
+        // The tomato has a rounded corner: the cat dips in front of it instead
+        // of stopping dead, but it cannot walk through the fruit.
+        assert!(g.cats[0].x > 4.0, "x={}", g.cats[0].x);
+        assert!(g.cats[0].y > 1.05, "y={}", g.cats[0].y);
     }
 
     #[test]
-    fn tomato_horizontal_block_matches_the_apple_art() {
-        let tomato = tomato_collider(&[3, 1]);
-        assert!(((tomato.right - tomato.left) - 0.4).abs() < 1e-6);
+    fn tomato_horizontal_block_matches_the_drawn_fruit() {
+        let tomato = Collider::tomato(&[3, 1]);
+        let Collider::RoundedRect {
+            left,
+            top,
+            right,
+            bottom,
+            corner,
+            ..
+        } = tomato
+        else {
+            panic!("tomato should be a rounded rectangle");
+        };
+        // Full drawn width, lower part of the fruit, ending at the drawn base.
+        assert!((right - left - 0.40625).abs() < 1e-6);
+        assert!((top - 1.6).abs() < 1e-6);
+        assert!((bottom - 1.6875).abs() < 1e-6);
+        assert!((corner - TOMATO_CORNER).abs() < 1e-6);
         let (x, _) =
             move_sprite_with_colliders(1.0, 1.0, Dir::Right, 3.0, &[tomato]);
-        assert!((x - 2.35).abs() < 2e-4);
+        assert!((x - 2.40156).abs() < 2e-4);
+    }
+
+    #[test]
+    fn actor_capsule_ignores_the_tail() {
+        let Collider::Capsule { cx, cy, r, half } = Collider::actor(1.0, 1.0)
+        else {
+            panic!("actors should be capsules");
+        };
+        // The capsule spans the ground footprint. The sprite is centred on the
+        // body, so the tail is not a separate lobe that can widen or catch it.
+        assert!((2.0 * (half + r) - 0.9).abs() < 1e-6);
+        assert!((cx - 1.5).abs() < 1e-6);
+        assert!((cy - 1.8).abs() < 1e-6);
+        assert!((r - 0.2).abs() < 1e-6);
+        assert!((half - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tomato_bottom_does_not_block_the_cell_below() {
+        let tomato = Collider::tomato(&[4, 1]);
+        // Below the drawn base: walk straight past the tomato.
+        let (x, _) =
+            move_sprite_with_colliders(1.0, 1.2, Dir::Right, 4.0, &[tomato]);
+        assert!((x - 5.0).abs() < 2e-4);
+        // Same row: still blocked horizontally.
+        let (x, _) =
+            move_sprite_with_colliders(1.0, 1.0, Dir::Right, 4.0, &[tomato]);
+        assert!((x - 3.40156).abs() < 2e-4);
+    }
+
+    #[test]
+    fn tomato_blocks_vertical_movement() {
+        let tomato = Collider::tomato(&[4, 1]);
+        // Approaching from below: stop at the drawn base instead of passing
+        // through the fruit.
+        let (x, y) =
+            move_sprite_with_colliders(4.0, 2.0, Dir::Up, 2.0, &[tomato]);
+        assert!((x - 4.0).abs() < 2e-4, "x={x}");
+        assert!((y - 1.0875).abs() < 2e-4, "y={y}");
+    }
+
+    #[test]
+    fn diagonal_movement_slides_along_a_tomato() {
+        let tomato = Collider::tomato(&[4, 1]);
+        let (x, y) =
+            move_sprite_with_vector(3.40156, 1.0, 0.1, 0.1, &[tomato], &[]);
+        assert!((x - 3.40156).abs() < 2e-4, "x={x}");
+        assert!((y - 1.1).abs() < 2e-4, "y={y}");
+    }
+
+    #[test]
+    fn diagonal_movement_slides_along_a_box() {
+        let boxes = box_run_colliders(&[[3, 1]]);
+        let (x, y) = move_sprite_with_vector(2.15, 1.0, 0.1, -0.1, &boxes, &[]);
+        assert!((x - 2.15).abs() < 2e-4, "x={x}");
+        assert!((y - 0.9).abs() < 2e-4, "y={y}");
+    }
+
+    #[test]
+    fn diagonal_movement_cuts_around_a_box_corner() {
+        let boxes = box_run_colliders(&[[3, 1]]);
+        let (mut x, mut y) = (2.15, 1.0);
+        for _ in 0..30 {
+            (x, y) = move_sprite_with_vector(x, y, 0.05, 0.05, &boxes, &[]);
+        }
+        assert!(x > 2.5, "x={x} y={y}");
+        assert!(y > 1.3, "x={x} y={y}");
+    }
+
+    #[test]
+    fn perpendicular_move_cuts_around_a_box_corner() {
+        let boxes = box_run_colliders(&[[3, 1]]);
+        // Touching the box's lower-left rounded corner: straight up would push
+        // into the corner, so a small sideways nudge lets it slide past.
+        let (x, y) =
+            move_sprite_with_vector(2.1617, 1.2, 0.0, -0.05, &boxes, &[]);
+        assert!(y < 1.2 - 0.04, "y={y}");
+        assert!(x < 2.1617, "x={x}");
+    }
+
+    #[test]
+    fn diagonal_movement_does_not_slip_through_a_diagonal_seam() {
+        let boxes = [[3, 3], [4, 4]];
+        let (x, _) = move_sprite_with_vector(
+            1.0,
+            3.5,
+            10.0,
+            10.0,
+            &box_run_colliders(&boxes),
+            &box_seams(&boxes),
+        );
+        assert!(x < 3.2, "x={x}");
+    }
+
+    #[test]
+    fn rounded_tomato_corner_is_softer_than_a_square_corner() {
+        let tomato = Collider::tomato(&[4, 1]);
+        let Collider::RoundedRect {
+            left,
+            top,
+            right,
+            bottom,
+            ..
+        } = tomato
+        else {
+            panic!("tomato should be a rounded rectangle");
+        };
+        let square = Collider::Rect {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let (rounded_x, _) =
+            move_sprite_with_colliders(1.0, 0.75, Dir::Right, 4.0, &[tomato]);
+        let (square_x, _) =
+            move_sprite_with_colliders(1.0, 0.75, Dir::Right, 4.0, &[square]);
+        assert!(rounded_x > square_x + 1e-3);
     }
 
     #[test]
@@ -754,6 +2081,22 @@ mod tests {
             }
         }
         assert_eq!(out, Some(Outcome::CatWin));
+    }
+
+    #[test]
+    fn cat_catches_rat_before_the_sprites_touch() {
+        let mut g = Game::new(&map(&[[1, 1]], &[[1, 2]], &[[18, 9]], &[]), 1);
+        g.rats[0].x = 1.3;
+        g.rats[0].y = 1.0;
+        g.step(&Input::default());
+        assert!(!g.rats[0].alive, "rat at x=1.3 was not caught");
+
+        // Vertical reach is circular too: 0.7 right + 0.7 down is outside.
+        let mut g = Game::new(&map(&[[1, 1]], &[[1, 2]], &[[18, 9]], &[]), 1);
+        g.rats[0].x = 1.7;
+        g.rats[0].y = 1.7;
+        g.step(&Input::default());
+        assert!(g.rats[0].alive, "rat outside the circle was caught");
     }
 
     #[test]
@@ -784,6 +2127,112 @@ mod tests {
             g.step(&Input::default());
         }
         assert!(!g.spikes_active);
+    }
+
+    #[test]
+    fn raised_spikes_block_at_their_base() {
+        let m = Map {
+            spikes: vec![[3, 1]],
+            ..map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[])
+        };
+        let mut g = Game::new(&m, 1);
+        g.spikes_active = true;
+        // Under one second, so the spikes stay raised for the whole walk.
+        for _ in 0..30 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        // Stopped at the spike base, same as a box.
+        assert!(
+            (g.rats[0].x - 2.11167).abs() < 1e-2,
+            "rat at x={}",
+            g.rats[0].x
+        );
+    }
+
+    #[test]
+    fn stacked_spikes_form_a_solid_wall() {
+        let m = Map {
+            spikes: vec![[3, 1], [3, 2]],
+            ..map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[])
+        };
+        let mut g = Game::new(&m, 1);
+        g.spikes_active = true;
+        // Feet in the gap between the two spike bases.
+        g.rats[0].y = 1.3;
+        for _ in 0..30 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x < 3.0, "rat at x={}", g.rats[0].x);
+    }
+
+    #[test]
+    fn diagonal_spikes_have_no_corner_gap() {
+        for spikes in [&[[3, 3], [4, 4]][..], &[[4, 3], [3, 4]][..]] {
+            let m = Map {
+                spikes: spikes.to_vec(),
+                ..map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[])
+            };
+            let mut g = Game::new(&m, 1);
+            g.spikes_active = true;
+            // Feet in the gap between the two spike bases.
+            g.rats[0].y = 3.3;
+            for _ in 0..30 {
+                g.step(&rat_holds(Dir::Right));
+            }
+            // Stops at the gap edge instead of slipping through the corner.
+            assert!(
+                g.rats[0].x < 3.4,
+                "spikes {spikes:?}: rat at x={}",
+                g.rats[0].x
+            );
+        }
+    }
+
+    #[test]
+    fn sprites_can_walk_behind_raised_spikes() {
+        let m = Map {
+            spikes: vec![[3, 1]],
+            ..map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[])
+        };
+        let mut g = Game::new(&m, 1);
+        g.spikes_active = true;
+        // Feet above the spike base: walk behind the raised spikes.
+        g.rats[0].y = 0.3;
+        for _ in 0..30 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!(g.rats[0].x > 3.0, "rat at x={}", g.rats[0].x);
+    }
+
+    #[test]
+    fn a_sprite_on_a_raised_spike_cannot_walk() {
+        let m = Map {
+            spikes: vec![[1, 1]],
+            ..map(&[[0, 0]], &[[1, 1]], &[[19, 9]], &[])
+        };
+        let mut g = Game::new(&m, 1);
+        g.spikes_active = true;
+        for _ in 0..30 {
+            g.step(&rat_holds(Dir::Right));
+        }
+        assert!((g.rats[0].x - 1.0).abs() < 1e-6, "rat at x={}", g.rats[0].x);
+    }
+
+    #[test]
+    fn raised_spike_catches_the_rounded_end_of_a_capsule() {
+        let m = Map {
+            spikes: vec![[3, 1]],
+            ..map(&[[0, 0]], &[[2, 1]], &[[19, 9]], &[])
+        };
+        let mut g = Game::new(&m, 1);
+        g.spikes_active = true;
+        // The capsule's right end just touches the spike's left edge.
+        g.rats[0].x = 2.1;
+        assert!(g.on_raised_spike(g.rats[0].x, g.rats[0].y));
+        for _ in 0..30 {
+            g.step(&rat_holds(Dir::Left));
+        }
+        assert!((g.rats[0].x - 2.1).abs() < 1e-6, "rat at x={}", g.rats[0].x);
     }
 
     #[test]

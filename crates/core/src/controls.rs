@@ -70,8 +70,26 @@ impl SideControl {
         self.facing
     }
 
+    /// Unit movement vector for the held keys. Opposite keys cancel, and a
+    /// diagonal keeps the same speed as a single axis.
+    pub fn movement(&self) -> (f32, f32) {
+        let (mut x, mut y) = (0.0, 0.0);
+        for &dir in &self.held {
+            let (dx, dy) = dir.delta();
+            x += dx;
+            y += dy;
+        }
+        if x != 0.0 && y != 0.0 {
+            let scale = std::f32::consts::FRAC_1_SQRT_2;
+            (x * scale, y * scale)
+        } else {
+            (x, y)
+        }
+    }
+
     pub fn is_moving(&self) -> bool {
-        !self.held.is_empty()
+        let (x, y) = self.movement();
+        x != 0.0 || y != 0.0
     }
 
     pub fn clear(&mut self) {
@@ -104,5 +122,16 @@ mod tests {
         c.update([false, false, true, false]); // Left
         c.update([false, false, true, true]); // Left + Right
         assert_eq!(c.facing(), Dir::Right);
+        assert_eq!(c.movement(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn diagonal_movement_keeps_unit_speed() {
+        let mut c = SideControl::default();
+        c.update([true, false, false, true]); // Up + Right
+        let (x, y) = c.movement();
+        assert!((x - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert!((y + std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        assert!((x * x + y * y - 1.0).abs() < 1e-6);
     }
 }

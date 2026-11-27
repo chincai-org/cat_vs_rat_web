@@ -2,21 +2,23 @@
 
 use std::cell::{Cell, RefCell};
 
-use crate::assets::Assets;
+use crate::assets::{Art, Assets};
 use cat_vs_rat_core::{Game, Map};
 use macroquad::prelude::*;
 
 pub const W: f32 = 1280.0;
 pub const H: f32 = 640.0;
 
-#[derive(Clone, Copy)]
+/// Draw order for sprites at the same depth. Spikes are floor decals, so they
+/// come first and actors cover them when they share a cell.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SpriteKind {
-    Cat,
-    RatAlive,
-    RatDead,
-    Box,
-    Tomato,
     Spike,
+    Tomato,
+    Box,
+    RatDead,
+    RatAlive,
+    Cat,
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +115,13 @@ impl View {
 
     pub fn tex(&self, t: &Texture2D, x: f32, y: f32, w: f32, h: f32) {
         self.tex_tinted(t, x, y, w, h, WHITE);
+    }
+
+    /// Draws a sprite with its visible art centred in the given box.
+    pub fn art(&self, a: &Art, x: f32, y: f32, w: f32, h: f32) {
+        let dx = (0.5 - a.center.x) * w;
+        let dy = (0.5 - a.center.y) * h;
+        self.tex(&a.texture, x + dx, y + dy, w, h);
     }
 
     pub fn tex_tinted(
@@ -234,7 +243,7 @@ pub fn draw_board_bg(v: &View, a: &Assets, cell: f32, ox: f32, oy: f32) {
 pub fn draw_game(v: &View, a: &Assets, g: &Game, cell: f32, ox: f32, oy: f32) {
     draw_board_bg(v, a, cell, ox, oy);
     for hole in &g.holes {
-        v.tex(
+        v.art(
             &a.hole,
             ox + hole[0] as f32 * cell,
             oy + hole[1] as f32 * cell,
@@ -287,13 +296,19 @@ pub fn draw_game(v: &View, a: &Assets, g: &Game, cell: f32, ox: f32, oy: f32) {
         }
         for &[x, y] in &g.spikes {
             sprites.push(Sprite {
-                depth: y as f32 + 1.0,
+                // Half a row up: still in front of the row above, but under an
+                // actor standing in or over the spike cell.
+                depth: y as f32 + 0.5,
                 kind: SpriteKind::Spike,
                 x: x as f32,
                 y: y as f32,
             });
         }
-        sprites.sort_by(|left, right| left.depth.total_cmp(&right.depth));
+        sprites.sort_by(|left, right| {
+            left.depth
+                .total_cmp(&right.depth)
+                .then(left.kind.cmp(&right.kind))
+        });
 
         let spike = if g.spikes_active {
             &a.spike_active
@@ -309,7 +324,7 @@ pub fn draw_game(v: &View, a: &Assets, g: &Game, cell: f32, ox: f32, oy: f32) {
                 SpriteKind::Tomato => &a.tomato,
                 SpriteKind::Spike => spike,
             };
-            v.tex(
+            v.art(
                 texture,
                 ox + sprite.x * cell,
                 oy + sprite.y * cell,
@@ -323,7 +338,7 @@ pub fn draw_game(v: &View, a: &Assets, g: &Game, cell: f32, ox: f32, oy: f32) {
 /// Editor view of a map: everything facing down, spikes shown in their active art.
 pub fn draw_map(v: &View, a: &Assets, map: &Map, cell: f32, ox: f32, oy: f32) {
     for h in &map.holes {
-        v.tex(
+        v.art(
             &a.hole,
             ox + h[0] as f32 * cell,
             oy + h[1] as f32 * cell,
@@ -332,7 +347,7 @@ pub fn draw_map(v: &View, a: &Assets, map: &Map, cell: f32, ox: f32, oy: f32) {
         );
     }
     for c in &map.cats {
-        v.tex(
+        v.art(
             &a.cat[1],
             ox + c[0] as f32 * cell,
             oy + c[1] as f32 * cell,
@@ -341,7 +356,7 @@ pub fn draw_map(v: &View, a: &Assets, map: &Map, cell: f32, ox: f32, oy: f32) {
         );
     }
     for r in &map.rats {
-        v.tex(
+        v.art(
             &a.rat[1],
             ox + r[0] as f32 * cell,
             oy + r[1] as f32 * cell,
@@ -350,7 +365,7 @@ pub fn draw_map(v: &View, a: &Assets, map: &Map, cell: f32, ox: f32, oy: f32) {
         );
     }
     for b in &map.boxes {
-        v.tex(
+        v.art(
             &a.boxx,
             ox + b[0] as f32 * cell,
             oy + b[1] as f32 * cell,
@@ -359,7 +374,7 @@ pub fn draw_map(v: &View, a: &Assets, map: &Map, cell: f32, ox: f32, oy: f32) {
         );
     }
     for t in &map.tomatoes {
-        v.tex(
+        v.art(
             &a.tomato,
             ox + t[0] as f32 * cell,
             oy + t[1] as f32 * cell,
@@ -368,7 +383,7 @@ pub fn draw_map(v: &View, a: &Assets, map: &Map, cell: f32, ox: f32, oy: f32) {
         );
     }
     for s in &map.spikes {
-        v.tex(
+        v.art(
             &a.spike_active,
             ox + s[0] as f32 * cell,
             oy + s[1] as f32 * cell,
